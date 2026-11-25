@@ -28,7 +28,8 @@ pub async fn health() -> impl IntoResponse {
     Json(json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "name": "fanout-rust"}))
 }
 
-pub async fn exits(State(m): State<Arc<Manager>>) -> impl IntoResponse {
+pub async fn exits(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let m = &state.manager;
     Json(ExitsView {
         exits: m.exits().await,
         direct: Vec::new(),
@@ -36,12 +37,13 @@ pub async fn exits(State(m): State<Arc<Manager>>) -> impl IntoResponse {
         panel: Vec::new(),
         backend: "native".into(),
         panel_info: "fanout-rust 自建 Xray".into(),
-        public_ip: String::new(),
+        public_ip: crate::publicip::host_public_ip(),
         warp: WarpOverview::default(),
     })
 }
 
-pub async fn tunnels(State(m): State<Arc<Manager>>) -> impl IntoResponse {
+pub async fn tunnels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let m = &state.manager;
     Json(m.states().await)
 }
 
@@ -51,9 +53,10 @@ pub struct NodesQuery {
 }
 
 pub async fn nodes(
-    State(m): State<Arc<Manager>>,
+    State(state): State<Arc<AppState>>,
     Query(q): Query<NodesQuery>,
 ) -> impl IntoResponse {
+    let m = &state.manager;
     let all = q.all.as_deref() == Some("1");
     let (nodes, fetched) = m.node_list(all).await;
     let total = nodes.len();
@@ -66,7 +69,8 @@ pub async fn nodes(
     }))
 }
 
-pub async fn regions(State(m): State<Arc<Manager>>) -> impl IntoResponse {
+pub async fn regions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let m = &state.manager;
     Json(m.regions().await)
 }
 
@@ -75,7 +79,8 @@ pub struct HostQuery {
     pub host: String,
 }
 
-pub async fn start(State(m): State<Arc<Manager>>, Query(q): Query<HostQuery>) -> Response {
+pub async fn start(State(state): State<Arc<AppState>>, Query(q): Query<HostQuery>) -> Response {
+    let m = &state.manager;
     let nodes = m.node_list(true).await.0;
     let Some(node) = nodes.into_iter().find(|n| n.hostname == q.host) else {
         return error(StatusCode::NOT_FOUND, "节点不存在");
@@ -91,14 +96,16 @@ pub struct SlotQuery {
     pub slot: usize,
 }
 
-pub async fn stop(State(m): State<Arc<Manager>>, Query(q): Query<SlotQuery>) -> Response {
+pub async fn stop(State(state): State<Arc<AppState>>, Query(q): Query<SlotQuery>) -> Response {
+    let m = &state.manager;
     match m.stop(q.slot).await {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => error(StatusCode::NOT_FOUND, e.to_string()),
     }
 }
 
-pub async fn swap(State(m): State<Arc<Manager>>, Query(q): Query<SlotQuery>) -> Response {
+pub async fn swap(State(state): State<Arc<AppState>>, Query(q): Query<SlotQuery>) -> Response {
+    let m = &state.manager;
     match m.swap(q.slot).await {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => error(StatusCode::CONFLICT, e.to_string()),
@@ -114,14 +121,16 @@ pub struct CredQuery {
     pub pass: String,
 }
 
-pub async fn cred(State(m): State<Arc<Manager>>, Query(q): Query<CredQuery>) -> Response {
+pub async fn cred(State(state): State<Arc<AppState>>, Query(q): Query<CredQuery>) -> Response {
+    let m = &state.manager;
     match m.set_cred(q.slot, q.user, q.pass).await {
         Ok(c) => Json(json!({"user": c.user, "pass": c.pass})).into_response(),
         Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
 
-pub async fn refresh(State(m): State<Arc<Manager>>) -> Response {
+pub async fn refresh(State(state): State<Arc<AppState>>) -> Response {
+    let m = &state.manager;
     match m.refresh_nodes().await {
         Ok(n) => Json(json!({"count": n})).into_response(),
         Err(e) => error(StatusCode::BAD_GATEWAY, e.to_string()),
@@ -139,7 +148,11 @@ pub struct ProvisionQuery {
     pub every: String,
 }
 
-pub async fn provision(State(m): State<Arc<Manager>>, Query(q): Query<ProvisionQuery>) -> Response {
+pub async fn provision(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ProvisionQuery>,
+) -> Response {
+    let m = &state.manager;
     let req = ProvisionRequest {
         region: q.region,
         count: q.count,
@@ -152,7 +165,8 @@ pub async fn provision(State(m): State<Arc<Manager>>, Query(q): Query<ProvisionQ
     }
 }
 
-pub async fn jobs(State(m): State<Arc<Manager>>) -> impl IntoResponse {
+pub async fn jobs(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let m = &state.manager;
     Json(m.jobs.views().await)
 }
 
@@ -162,9 +176,10 @@ pub struct JobQuery {
 }
 
 pub async fn job_dismiss(
-    State(m): State<Arc<Manager>>,
+    State(state): State<Arc<AppState>>,
     Query(q): Query<JobQuery>,
 ) -> impl IntoResponse {
+    let m = &state.manager;
     m.jobs.dismiss(&q.id).await;
     Json(json!({"ok": true}))
 }
@@ -177,8 +192,11 @@ pub async fn warp() -> impl IntoResponse {
     Json(WarpOverview::default())
 }
 
-pub async fn stats() -> impl IntoResponse {
-    Json(json!({}))
+pub async fn stats(State(state): State<Arc<AppState>>) -> Response {
+    match crate::hoststats::read_host_stats(&state.dir) {
+        Ok(s) => Json(s).into_response(),
+        Err(e) => internal(e),
+    }
 }
 
 pub async fn client_status() -> impl IntoResponse {
@@ -312,17 +330,18 @@ pub async fn subscription(
     }
     let links: Vec<String> = Vec::new();
     match crate::sub::encode_sub(&links, q.target.as_deref().unwrap_or("base64")) {
-        Ok(body) => (
-            [
-                (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
-                (
-                    axum::http::HeaderName::from_static("profile-update-interval"),
-                    "12".parse().unwrap(),
-                ),
-            ],
-            body,
-        )
-            .into_response(),
+        Ok(body) => {
+            let mut h = HeaderMap::new();
+            h.insert(
+                header::CONTENT_TYPE,
+                "text/plain; charset=utf-8".parse().unwrap(),
+            );
+            h.insert(
+                axum::http::HeaderName::from_static("profile-update-interval"),
+                "12".parse().unwrap(),
+            );
+            (h, body).into_response()
+        }
         Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }

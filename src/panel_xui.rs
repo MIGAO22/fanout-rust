@@ -17,6 +17,7 @@ use regex::Regex;
 use reqwest::{Client, Method, StatusCode};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use std::sync::Mutex as StdMutex;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -478,7 +479,10 @@ impl XUI {
             }));
         }
         routing.insert("rules".into(), Value::Array(cleaned));
-        setting.insert("routing".into(), Value::Object(routing));
+        setting
+            .as_object_mut()
+            .unwrap()
+            .insert("routing".into(), Value::Object(routing));
         self.save_xray(setting, test_url).await
     }
 
@@ -542,7 +546,7 @@ impl XUI {
                 taken_remarks.insert(unique);
             }
             let new_id = self
-                .add_inbound(&clone)
+                .add_inbound(&Value::Object(clone.clone()))
                 .await
                 .with_context(|| format!("复制到端口 {port} 失败"))?;
             self.attach_clients(&emails, new_id).await?;
@@ -723,7 +727,10 @@ impl XUI {
             }
         }
         routing.insert("rules".into(), Value::Array(cleaned));
-        setting.insert("routing".into(), Value::Object(routing));
+        setting
+            .as_object_mut()
+            .unwrap()
+            .insert("routing".into(), Value::Object(routing));
         self.save_xray(setting, test_url).await?;
         Ok(ids.len())
     }
@@ -860,7 +867,10 @@ impl XUI {
             let mut clients = clients;
             clients.push(Value::Object(new_client_entry(&protocol, &email)));
             settings.insert("clients".into(), Value::Array(clients));
-            payload.insert("settings".into(), Value::String(settings.to_string()));
+            payload.insert(
+                "settings".into(),
+                Value::String(serde_json::to_string(&settings)?),
+            );
             Ok(())
         })
         .await
@@ -890,7 +900,10 @@ impl XUI {
                 bail!("这是最后一个客户端，删掉入站就没人能连了");
             }
             settings.insert("clients".into(), Value::Array(kept));
-            payload.insert("settings".into(), Value::String(settings.to_string()));
+            payload.insert(
+                "settings".into(),
+                Value::String(serde_json::to_string(&settings)?),
+            );
             Ok(())
         })
         .await
@@ -899,8 +912,10 @@ impl XUI {
     async fn reset_client_runtime(&self, id: i64, email: &str) -> Result<ClientInfo> {
         let raw = self.raw_inbound(id).await?;
         let protocol = scalar_string(raw.get("protocol"));
-        let mut reset_info: Option<ClientInfo> = None;
+        let reset_slot = Arc::new(StdMutex::new(None));
+        let reset_out = reset_slot.clone();
         self.update_inbound_raw(id, "重置凭据", move |payload, raw| {
+            let reset_slot = reset_out.clone();
             let mut settings = as_object(raw.get("settings")).context("解析 settings 失败")?;
             let mut clients = settings
                 .get("clients")
@@ -924,7 +939,7 @@ impl XUI {
                     client.insert("id".into(), Value::String(id.clone()));
                     id
                 };
-                reset_info = Some(ClientInfo {
+                *reset_slot.lock().unwrap() = Some(ClientInfo {
                     email: email.to_string(),
                     id: credential,
                     enable: client.get("enable") != Some(&Value::Bool(false)),
@@ -934,11 +949,19 @@ impl XUI {
                 bail!("客户端 {email} 不存在");
             }
             settings.insert("clients".into(), Value::Array(clients));
-            payload.insert("settings".into(), Value::String(settings.to_string()));
+            payload.insert(
+                "settings".into(),
+                Value::String(serde_json::to_string(&settings)?),
+            );
             Ok(())
         })
         .await?;
-        reset_info.context("重置后未返回客户端信息")
+        let info = reset_slot
+            .lock()
+            .unwrap()
+            .take()
+            .context("重置后未返回客户端信息");
+        info
     }
 
     async fn resync_runtime(&self) -> Result<()> {
@@ -1117,7 +1140,7 @@ struct Envelope {
 
 fn panel_backoff(attempt: usize) -> Duration {
     let millis = 200u64 * (1u64 << (attempt.saturating_sub(1)));
-    let jitter = rand::thread_rng().gen_range(0..120);
+    let jitter = rand::thread_rng().gen_range(0u64..120);
     Duration::from_millis(millis + jitter)
 }
 
@@ -1129,11 +1152,11 @@ fn local_client() -> Result<Client> {
         .context("创建 3x-ui HTTP 客户端失败")
 }
 
-async fn command_output(mut command: Command) -> Result<std::process::Output> {
+async fn command_output(command: &mut Command) -> Result<std::process::Output> {
     command.output().await.context("执行命令失败")
 }
 
-async fn command_output_checked(command: Command) -> Result<std::process::Output> {
+async fn command_output_checked(command: &mut Command) -> Result<std::process::Output> {
     let out = command_output(command).await?;
     if !out.status.success() {
         bail!(
@@ -1144,7 +1167,7 @@ async fn command_output_checked(command: Command) -> Result<std::process::Output
     Ok(out)
 }
 
-async fn command_succeeded(mut command: Command) -> bool {
+async fn command_succeeded(command: &mut Command) -> bool {
     command.status().await.is_ok_and(|status| status.success())
 }
 
@@ -1161,7 +1184,7 @@ async fn panel_access() -> Option<(String, String)> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().await.ok()?;
+    let mut child = command.spawn().ok()?;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(b"11\n\n0\n").await;
     }
@@ -1199,7 +1222,8 @@ pub async fn detect(work_dir: impl AsRef<Path>) -> Result<XUI> {
         } else if let Ok(cert) =
             command_output(Command::new(XUI_BINARY).args(["setting", "-getCert"])).await
         {
-            if cert.status.success() && xui_cert_configured(&String::from_utf8_lossy(&cert.stdout)) {
+            if cert.status.success() && xui_cert_configured(&String::from_utf8_lossy(&cert.stdout))
+            {
                 scheme = "https".into();
             }
         }
@@ -1207,8 +1231,10 @@ pub async fn detect(work_dir: impl AsRef<Path>) -> Result<XUI> {
 
     let cached = token_cache().lock().await.clone();
     if !cached.is_empty() {
-        return XUI::new(host, settings.port, settings.base_path, scheme, cached)?
-            .with_work_dir(work_dir);
+        return Ok(
+            XUI::new(host, settings.port, settings.base_path, scheme, cached)?
+                .with_work_dir(work_dir),
+        );
     }
     if !work_dir.as_ref().as_os_str().is_empty() {
         if let Some(saved) = read_saved_token(work_dir.as_ref()).await {
@@ -1750,6 +1776,9 @@ fn fix_vmess_link(payload: &str, port: u16, public_host: &str) -> Option<(String
         ));
     };
     let mut config: Value = serde_json::from_slice(&blob).ok()?;
+    if !config.is_object() {
+        return None;
+    }
     if value_to_u16(config.get("port")) != port {
         return None;
     }
@@ -2323,7 +2352,9 @@ async fn check_reality_dest(dest: &str, server_name: &str) -> Result<()> {
 
 fn random_hex(bytes: usize) -> String {
     let mut value = vec![0u8; bytes];
-    rand::thread_rng().fill(&mut value);
+    for b in &mut value {
+        *b = rand::random();
+    }
     hex::encode(value)
 }
 
@@ -2369,7 +2400,7 @@ fn xui_stream_settings(
         "grpc" => {
             stream.insert(
                 "grpcSettings".into(),
-                json!({"serviceName": spec.path.trim_start_matches('/')}),
+                json!({"serviceName": spec.path.strip_prefix('/').unwrap_or(&spec.path)}),
             );
         }
         _ => {}

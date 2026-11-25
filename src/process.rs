@@ -86,9 +86,7 @@ where
                 })
                 .context("启动母机网络命名空间线程失败")?;
 
-            receiver
-                .recv()
-                .context("母机网络命名空间线程异常退出")?
+            receiver.recv().context("母机网络命名空间线程异常退出")?
         })
     }
 
@@ -108,32 +106,41 @@ pub(crate) fn enter_netns(file: &File) -> io::Result<()> {
 
 /// Run a configured command in the host namespace.
 pub fn run_command(command: &mut Command) -> Result<()> {
-    in_main_netns(move || command.run().context("执行命令失败"))
+    in_main_netns(move || command.status().map(|_| ()).map_err(Into::into))
 }
 
 /// Start a configured long-lived process in the host namespace.
 pub fn start_command(command: &mut Command) -> Result<std::process::Child> {
-    in_main_netns(move || command.spawn().context("启动子进程失败"))
+    in_main_netns(move || Ok(command.spawn()?))
 }
 
 /// Start a Tokio process in the host namespace. The returned child can be
 /// awaited without moving the calling task into a foreign namespace.
 pub fn start_tokio_command(command: &mut tokio::process::Command) -> Result<tokio::process::Child> {
-    let runtime = tokio::runtime::Handle::try_current()
-        .context("启动 Tokio 子进程需要 Tokio 运行时")?;
+    let runtime =
+        tokio::runtime::Handle::try_current().context("启动 Tokio 子进程需要 Tokio 运行时")?;
     in_main_netns(move || {
         // Tokio's non-pidfd Unix backend needs the runtime's signal driver.
         let _runtime_guard = runtime.enter();
-        command.spawn().context("启动子进程失败")
+        Ok(command.spawn()?)
     })
 }
 
 fn output_unchecked(command: &mut Command) -> Result<Output> {
-    in_main_netns(move || command.output().context("读取命令输出失败"))
+    in_main_netns(move || Ok(command.output()?))
 }
 
 fn combined_output_unchecked(command: &mut Command) -> Result<Output> {
-    in_main_netns(move || command.combined_output().context("读取命令输出失败"))
+    in_main_netns(move || {
+        let out = command.output()?;
+        let mut merged = out.stdout.clone();
+        merged.extend(out.stderr);
+        Ok(Output {
+            status: out.status,
+            stdout: merged,
+            stderr: Vec::new(),
+        })
+    })
 }
 
 fn command_parts(command: &Command) -> (String, Vec<String>) {
@@ -263,11 +270,10 @@ impl OvpnProc {
     /// Adopt a child and start its single background waiter. Requires a Tokio
     /// runtime; the child must already have been spawned via the host guard.
     pub fn from_child(child: Child) -> Result<Self> {
-        tokio::runtime::Handle::try_current()
-            .context("创建 openvpn 进程句柄需要 Tokio 运行时")?;
+        tokio::runtime::Handle::try_current().context("创建 openvpn 进程句柄需要 Tokio 运行时")?;
 
         let (exit, _) = watch::channel(None);
-        let pid = child.id();
+        let pid = child.id().unwrap_or(0);
         let inner = Arc::new(OvpnInner {
             child: Mutex::new(child),
             pid,
@@ -475,7 +481,7 @@ const OVPN_NODE_FAULTS: &[(&str, &str)] = &[
     ("peer connection initiated", "节点已应答，卡在后面的步骤"),
 ];
 
-fn why_here(table: &[(&str, &str)], lower: &str) -> Option<&'static str> {
+fn why_here(table: &[(&'static str, &'static str)], lower: &str) -> Option<&'static str> {
     table
         .iter()
         .find_map(|(needle, why)| lower.contains(needle).then_some(*why))

@@ -201,6 +201,6 @@ pub fn temp_dir(prefix: &str) -> Result<PathBuf> {
     Ok(tempfile::Builder::new()
         .prefix(prefix)
         .tempdir()
-        .map_err(Into::into)?
+        .map_err(anyhow::Error::from)?
         .keep())
 }

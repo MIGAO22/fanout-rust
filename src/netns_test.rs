@@ -1,9 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    fs,
-    path::Path,
-    time::Duration,
-};
+use std::{collections::BTreeSet, fs, path::Path, time::Duration};
 
 use crate::{
     instance::{
@@ -11,9 +6,9 @@ use crate::{
         pick_net_base_with_used, Instance, DEFAULT_NET_BASE, NET_BASE_MAX, NET_BASE_MIN,
     },
     netns::{
-        force_ipv4_network, netns_direct_cmds, route_has_default, Network, Netns, NetnsDirect,
+        force_ipv4_network, netns_direct_cmds, route_has_default, Netns, NetnsDirect, Network,
     },
-    process::{ovpn_error_line, ovpn_tuning, openvpn_argv},
+    process::{openvpn_argv, ovpn_error_line, ovpn_tuning},
     util::{fnv1a32, path_string, short_hash},
 };
 
@@ -23,6 +18,15 @@ fn flat(commands: Vec<Vec<String>>) -> String {
         .map(|command| command.join(" "))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(unix)]
+#[test]
+fn init_default_directory_keeps_legacy_identity() {
+    for path in ["/var/lib/fanout", "/var/lib/fanout/"] {
+        let instance = Instance::init(path).unwrap();
+        assert_eq!(instance, Instance::legacy());
+    }
 }
 
 #[test]
@@ -134,7 +138,7 @@ fn net_base_picker_uses_hash_start_then_advances_and_reports_exhaustion() {
     );
 
     let all_used: BTreeSet<u8> = (NET_BASE_MIN..=NET_BASE_MAX).collect();
-    let error = pick_net_base_with_used(abs, &all_used).unwrap_err();
+    let error = pick_net_base_with_used(abs, &all_used).err().unwrap();
     assert!(error.to_string().contains("都被占用了"));
 }
 
@@ -142,8 +146,8 @@ fn net_base_picker_uses_hash_start_then_advances_and_reports_exhaustion() {
 fn two_workdirs_can_be_assigned_distinct_identities() {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
-    let abs_a = a.path().join("a");
-    let abs_b = b.path().join("b");
+    let abs_a = Path::new("/opt/fanout-instance-a");
+    let abs_b = Path::new("/opt/fanout-instance-b");
     let mut used = BTreeSet::from([DEFAULT_NET_BASE]);
 
     let base_a = load_or_pick_net_base_with_used(a.path(), &abs_a, used.clone()).unwrap();
@@ -169,10 +173,7 @@ fn host_used_base_parser_keeps_only_10_x_second_octets() {
                       3: docker0 inet 10.255.1.1/16 scope global docker0\n\
                       4: eth1    inet 192.168.1.2/24 scope global eth1\n\
                       5: vpn0    inet fd00::1/128 scope global vpn0\n";
-    assert_eq!(
-        parse_host_used_net_bases(output),
-        BTreeSet::from([8, 255])
-    );
+    assert_eq!(parse_host_used_net_bases(output), BTreeSet::from([8, 255]));
 }
 
 #[cfg(unix)]
@@ -180,7 +181,7 @@ fn host_used_base_parser_keeps_only_10_x_second_octets() {
 fn workdir_lock_rejects_a_second_owner_and_releases_on_drop() {
     let dir = tempfile::tempdir().unwrap();
     let first = lock_work_dir(dir.path()).unwrap();
-    let error = lock_work_dir(dir.path()).unwrap_err();
+    let error = lock_work_dir(dir.path()).err().unwrap();
     assert!(error.to_string().contains("另一个 fanout"));
     assert!(error.to_string().contains("-dir"));
     drop(first);
@@ -209,7 +210,10 @@ fn direct_routes_are_exact_ipv4_pins_without_a_default() {
         assert_eq!(command[6], "dev");
         assert_eq!(command[7], "fop12");
         assert!(!command.join(" ").contains("default"));
-        assert!(!command.join(" ").contains(['&', '|', ';', '$', '`']));
+        assert!(!command
+            .join(" ")
+            .chars()
+            .any(|ch| matches!(ch, '&' | '|' | ';' | '$' | '`')));
     }
 }
 
@@ -237,18 +241,82 @@ fn direct_route_shape_and_order_are_stable() {
     }));
     assert_eq!(first, second);
     assert!(first.starts_with("ip route replace 1.1.1.1/32"));
+
+    let mapped = flat(netns_direct_cmds(NetnsDirect {
+        gw: "10.0.0.1".into(),
+        dev: "fop1".into(),
+        ips: vec!["::ffff:8.8.8.8".into()],
+    }));
+    assert_eq!(mapped, "ip route replace 8.8.8.8/32 via 10.0.0.1 dev fop1");
 }
 
 #[test]
 fn direct_routes_reject_v6_hostnames_and_missing_link_data() {
     let cases = [
-        (NetnsDirect { gw: "10.0.0.1".into(), dev: "fop1".into(), ips: vec!["fd00::1".into()] }, 0),
-        (NetnsDirect { gw: "10.0.0.1".into(), dev: "fop1".into(), ips: vec!["vpn.example.com".into()] }, 0),
-        (NetnsDirect { gw: "10.0.0.1".into(), dev: "fop1".into(), ips: vec!["".into(), "  ".into()] }, 0),
-        (NetnsDirect { gw: "10.0.0.1".into(), dev: "fop1".into(), ips: vec!["8.8.8.8".into(), "fd00::1".into(), "1.1.1.1".into()] }, 2),
-        (NetnsDirect { gw: String::new(), dev: "fop1".into(), ips: vec!["8.8.8.8".into()] }, 0),
-        (NetnsDirect { gw: "10.0.0.1".into(), dev: String::new(), ips: vec!["8.8.8.8".into()] }, 0),
-        (NetnsDirect { gw: "10.0.0.1".into(), dev: "fop1".into(), ips: vec![] }, 0),
+        (
+            NetnsDirect {
+                gw: "10.0.0.1".into(),
+                dev: "fop1".into(),
+                ips: vec!["fd00::1".into()],
+            },
+            0,
+        ),
+        (
+            NetnsDirect {
+                gw: "10.0.0.1".into(),
+                dev: "fop1".into(),
+                ips: vec!["vpn.example.com".into()],
+            },
+            0,
+        ),
+        (
+            NetnsDirect {
+                gw: "10.0.0.1".into(),
+                dev: "fop1".into(),
+                ips: vec!["".into(), "  ".into()],
+            },
+            0,
+        ),
+        (
+            NetnsDirect {
+                gw: "10.0.0.1".into(),
+                dev: "fop1".into(),
+                ips: vec!["8.8.8.8".into(), "fd00::1".into(), "1.1.1.1".into()],
+            },
+            2,
+        ),
+        (
+            NetnsDirect {
+                gw: "10.0.0.1".into(),
+                dev: "fop1".into(),
+                ips: vec!["::ffff:8.8.8.8".into()],
+            },
+            1,
+        ),
+        (
+            NetnsDirect {
+                gw: String::new(),
+                dev: "fop1".into(),
+                ips: vec!["8.8.8.8".into()],
+            },
+            0,
+        ),
+        (
+            NetnsDirect {
+                gw: "10.0.0.1".into(),
+                dev: String::new(),
+                ips: vec!["8.8.8.8".into()],
+            },
+            0,
+        ),
+        (
+            NetnsDirect {
+                gw: "10.0.0.1".into(),
+                dev: "fop1".into(),
+                ips: vec![],
+            },
+            0,
+        ),
     ];
     for (input, expected) in cases {
         assert_eq!(netns_direct_cmds(input).len(), expected);
@@ -294,15 +362,18 @@ fn openvpn_process_helpers_keep_command_and_failure_shape() {
     let args = vec!["--config".into(), "/tmp/fo1.ovpn".into()];
     assert_eq!(
         openvpn_argv("fo1", "/usr/sbin/openvpn", &args),
-        vec![
+        [
             "ip",
             "netns",
             "exec",
             "fo1",
             "/usr/sbin/openvpn",
             "--config",
-            "/tmp/fo1.ovpn",
+            "/tmp/fo1.ovpn"
         ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>()
     );
 
     let short = ovpn_tuning(Duration::from_secs(3), 1360);

@@ -10,9 +10,11 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use rand::{rngs::ThreadRng, Rng, RngCore};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
@@ -52,6 +54,14 @@ const REALITY_TIMEOUT: Duration = Duration::from_secs(8);
 // Persistent native.json schema
 // ---------------------------------------------------------------------------
 
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NativeClient {
     #[serde(default)]
@@ -84,13 +94,13 @@ pub struct TlsConfig {
 pub struct RealityConfig {
     #[serde(default)]
     pub dest: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub server_names: Vec<String>,
     #[serde(default)]
     pub private_key: String,
     #[serde(default)]
     pub public_key: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub short_ids: Vec<String>,
     #[serde(default)]
     pub fingerprint: String,
@@ -120,7 +130,7 @@ pub struct NativeInbound {
     pub remark: String,
     #[serde(default)]
     pub enable: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub clients: Vec<NativeClient>,
     #[serde(default)]
     pub bound_to: String,
@@ -152,7 +162,7 @@ impl NativeInbound {
 pub struct NativeStore {
     #[serde(default)]
     pub next_id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub inbounds: Vec<NativeInbound>,
 }
 
@@ -216,7 +226,7 @@ const CRED_USER_LEN: usize = 6;
 const CRED_PASS_LEN: usize = 14;
 const CRED_MAX_LEN: usize = 255;
 
-pub fn random_cred_string(n: usize, rng: &mut ThreadRng) -> Result<String> {
+fn random_cred_string_with_rng(n: usize, rng: &mut ThreadRng) -> Result<String> {
     let mut bytes = vec![0_u8; n];
     rng.fill_bytes(&mut bytes);
     Ok(bytes
@@ -225,11 +235,14 @@ pub fn random_cred_string(n: usize, rng: &mut ThreadRng) -> Result<String> {
         .collect())
 }
 
+pub fn random_cred_string(n: usize) -> Result<String> {
+    random_cred_string_with_rng(n, &mut rand::thread_rng())
+}
+
 pub fn new_socks_cred() -> Result<SocksCred> {
-    let mut rng = rand::thread_rng();
     Ok(SocksCred {
-        user: format!("fo{}", random_cred_string(CRED_USER_LEN, &mut rng)?),
-        pass: random_cred_string(CRED_PASS_LEN, &mut rng)?,
+        user: format!("fo{}", random_cred_string(CRED_USER_LEN)?),
+        pass: random_cred_string(CRED_PASS_LEN)?,
     })
 }
 
@@ -480,7 +493,7 @@ fn country_name(code: &str) -> &'static str {
         "DO" => "多米尼加",
         "PR" => "波多黎各",
         "JM" => "牙买加",
-        "TT" => "特立尼达和多巴哥",
+        "TT" => "特立尼达",
         "BS" => "巴哈马",
         "BZ" => "伯利兹",
         "EG" => "埃及",
@@ -824,7 +837,7 @@ pub fn stream_settings_json(ib: &NativeInbound) -> Value {
         "grpc" => {
             stream.insert(
                 "grpcSettings".into(),
-                json!({"serviceName": ib.path.trim_start_matches('/')}),
+                json!({"serviceName": ib.path.strip_prefix('/').unwrap_or(&ib.path)}),
             );
         }
         _ => {}
@@ -1008,7 +1021,10 @@ pub fn share_link(ib: &NativeInbound, client: &NativeClient, host: &str) -> Stri
             }
         }
         "grpc" => {
-            query.insert("serviceName".into(), ib.path.trim_start_matches('/').into());
+            query.insert(
+                "serviceName".into(),
+                ib.path.strip_prefix('/').unwrap_or(&ib.path).into(),
+            );
         }
         _ => {}
     }
@@ -1180,7 +1196,11 @@ impl MainNetns {
     fn capture() -> Result<Self> {
         #[cfg(unix)]
         {
-            let fd = File::open("/proc/self/ns/net").context("记录母机网络命名空间失败")?;
+            // /proc/self follows the calling thread. Use the process leader so
+            // opening the panel from a Tokio worker cannot capture a tunnel's
+            // namespace borrowed by some other thread.
+            let fd = File::open(format!("/proc/{}/ns/net", std::process::id()))
+                .context("记录母机网络命名空间失败")?;
             let fd: OwnedFd = fd.into();
             Ok(Self { fd: Arc::new(fd) })
         }
@@ -1210,8 +1230,7 @@ impl MainNetns {
             let fd = Arc::clone(&self.fd);
             tokio::task::spawn_blocking(move || {
                 std::thread::spawn(move || {
-                    setns(fd.as_raw_fd(), CloneFlags::CLONE_NEWNET)
-                        .context("切回母机网络命名空间失败")?;
+                    setns(fd, CloneFlags::CLONE_NEWNET).context("切回母机网络命名空间失败")?;
                     runtime.block_on(operation())
                 })
                 .join()
@@ -1222,19 +1241,38 @@ impl MainNetns {
     }
 }
 
-async fn command_output(
+async fn command_output_with_timeout(
     netns: &MainNetns,
     program: impl Into<PathBuf>,
     args: Vec<String>,
+    limit: Option<Duration>,
 ) -> Result<Output> {
     let program = program.into();
     netns
         .run(move || {
             let mut command = Command::new(program);
             command.args(args).stdin(Stdio::null()).kill_on_drop(true);
-            async move { command.output().await }
+            async move {
+                match limit {
+                    Some(limit) => {
+                        let out = timeout(limit, command.output())
+                            .await
+                            .context("外部命令执行超时")??;
+                        Ok(out)
+                    }
+                    None => Ok(command.output().await?),
+                }
+            }
         })
         .await
+}
+
+async fn command_output(
+    netns: &MainNetns,
+    program: impl Into<PathBuf>,
+    args: Vec<String>,
+) -> Result<Output> {
+    command_output_with_timeout(netns, program, args, None).await
 }
 
 fn combined_text(output: &Output) -> String {
@@ -1278,7 +1316,7 @@ pub fn xray_candidates(work_dir: impl AsRef<Path>) -> Vec<PathBuf> {
 fn executable(path: &Path) -> bool {
     match fs::metadata(path) {
         Ok(meta) if !meta.is_file() => false,
-        Ok(_) => {
+        Ok(meta) => {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -1353,24 +1391,22 @@ fn reality_host_port(dest: &str) -> (String, String) {
 }
 
 async fn check_reality_dest(netns: &MainNetns, dest: &str, server_name: &str) -> Result<()> {
-    let output = timeout(
-        REALITY_TIMEOUT,
-        command_output(
-            netns,
-            "openssl",
-            vec![
-                "s_client".into(),
-                "-connect".into(),
-                dest.into(),
-                "-servername".into(),
-                server_name.into(),
-                "-tls1_3".into(),
-                "-brief".into(),
-            ],
-        ),
+    let output = command_output_with_timeout(
+        netns,
+        "openssl",
+        vec![
+            "s_client".into(),
+            "-connect".into(),
+            dest.into(),
+            "-servername".into(),
+            server_name.into(),
+            "-tls1_3".into(),
+            "-brief".into(),
+        ],
+        Some(REALITY_TIMEOUT),
     )
     .await
-    .context("REALITY 目标站点 TLS1.3 握手超时")??;
+    .with_context(|| format!("{dest} 的 TLS1.3 握手失败"))?;
     if !output.status.success() {
         bail!(
             "{} 的 TLS1.3 握手失败: {}",
@@ -1386,6 +1422,9 @@ async fn reality_keys(netns: &MainNetns, bin: &Path) -> Result<(String, String)>
         .await
         .context("生成 REALITY 密钥失败")?;
     let text = combined_text(&output);
+    if !output.status.success() {
+        bail!("生成 REALITY 密钥失败: {}", trim_output(&text));
+    }
     let private = Regex::new(r"(?i)private\s*key:\s*(\S+)")?;
     let public = Regex::new(r"(?i)(?:password\s*\(publickey\)|public\s*key):\s*(\S+)")?;
     let private = private
@@ -1409,8 +1448,10 @@ async fn self_signed_cert(
     #[cfg(unix)]
     fs::set_permissions(&cert_dir, fs::Permissions::from_mode(0o700))?;
     let base = cert_dir.join(sanitize_tag(server_name));
-    let cert = base.with_extension("crt");
-    let key = base.with_extension("key");
+    let mut cert = base.clone();
+    cert.as_mut_os_string().push(".crt");
+    let mut key = base;
+    key.as_mut_os_string().push(".key");
     let output = command_output(
         netns,
         "openssl",
@@ -1501,7 +1542,10 @@ async fn build_reality(
     let mut dest = spec.dest.trim().to_string();
     if dest.is_empty() {
         dest = "www.tesla.com:443".into();
-    } else if reality_host_port(&dest).1 == "443" && !dest.contains(':') {
+    } else if !dest
+        .rsplit_once(':')
+        .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+    {
         dest.push_str(":443");
     }
     let mut names: Vec<String> = spec
@@ -1774,7 +1818,7 @@ impl XrayProc {
         if let Some(mut child) = state.child.take() {
             let _ = child.start_kill();
             if timeout(Duration::from_secs(2), child.wait()).await.is_err() {
-                tracing::warn!("等待 Xray 退出超时，PID {}", child.id());
+                tracing::warn!("等待 Xray 退出超时，PID {:?}", child.id());
             }
         }
         state.log.take();
@@ -1818,7 +1862,7 @@ impl XrayProc {
                     .stdout(Stdio::from(stdout_log))
                     .stderr(Stdio::from(stderr_log))
                     .kill_on_drop(true);
-                async move { command.spawn().await }
+                async move { Ok(command.spawn()?) }
             })
             .await
             .context("启动 Xray 失败")?;
@@ -1853,7 +1897,7 @@ impl XrayProc {
         let Ok(blob) = fs::read(&pid_path) else {
             return;
         };
-        let Ok(pid) = std::str::from_utf8(&blob)
+        let Some(pid) = std::str::from_utf8(&blob)
             .ok()
             .and_then(|s| s.trim().parse::<i32>().ok())
         else {
@@ -1993,7 +2037,8 @@ impl Native {
         tunnels: Vec<TunnelState>,
         pools: Vec<PoolView>,
     ) -> Result<()> {
-        self.update_runtime_and_apply(RuntimeSnapshot { tunnels, pools }).await
+        self.update_runtime_and_apply(RuntimeSnapshot { tunnels, pools })
+            .await
     }
 
     pub async fn update_runtime_and_apply(&self, runtime: RuntimeSnapshot) -> Result<()> {
@@ -2164,7 +2209,12 @@ impl Panel for Native {
         let bound_to = if host.is_empty() {
             String::new()
         } else if pool_identity_to_id(host).is_some() {
-            if !state.runtime.pools.iter().any(|pool| pool_identity(&pool.id) == host) {
+            if !state
+                .runtime
+                .pools
+                .iter()
+                .any(|pool| pool_identity(&pool.id) == host)
+            {
                 bail!("出口组 {host} 不存在或监听没起来");
             }
             sanitize_tag(host)
@@ -2223,6 +2273,7 @@ impl Panel for Native {
             .ok_or_else(|| anyhow!("模板入站 {id} 不存在"))?
             .clone();
         let mut used = state.store.used_ports();
+        used.extend(state.runtime.pools.iter().map(|pool| pool.port));
         let mut taken: HashSet<String> = state
             .store
             .inbounds
@@ -2289,7 +2340,9 @@ impl Panel for Native {
     async fn create_inbound(&self, spec: &Value) -> Result<CreatedInbound> {
         let spec = NewInboundSpec::from_value(spec)?;
         let mut state = self.inner.state.lock().await;
-        let normalized = normalize_inbound_spec(&spec, &state.store.used_ports())?;
+        let mut used_ports = state.store.used_ports();
+        used_ports.extend(state.runtime.pools.iter().map(|pool| pool.port));
+        let normalized = normalize_inbound_spec(&spec, &used_ports)?;
         let mut ib = NativeInbound {
             id: state.store.next_id,
             port: normalized.port,

@@ -126,6 +126,8 @@ pub struct PoolView {
     pub total: usize,
     pub socks_user: String,
     pub socks_pass: String,
+    #[serde(skip)]
+    pub cred: SocksCred,
     pub members: Vec<PoolMemberView>,
     pub inbounds: Vec<ExitInbound>,
     pub auto_fill: bool,

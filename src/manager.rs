@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use chrono::Utc;
 use std::{
     collections::{HashMap, HashSet},
@@ -7,17 +6,14 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{
-    sync::{Mutex, RwLock, Semaphore},
-    task::JoinHandle,
-};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::{
     config::WebSettings,
     jobs::{JobHandle, JobStore},
-    models::{Exit, Node, PersistedTunnel, RegionStat, SocksCred, TunnelState, WarpOverview},
+    models::{Exit, Node, PersistedTunnel, RegionStat, SocksCred, TunnelState},
     nodecache::NodeCache,
-    nodes::{country_label, new_socks_cred, node_label, order_candidates, selectable_nodes},
+    nodes::{country_label, new_socks_cred, node_label, order_candidates},
     panel::Panel,
     runtime::{TunnelFactory, TunnelRuntime},
     state::{load_state, save_state, StateFile},
@@ -265,8 +261,9 @@ impl Manager {
         self.tunnels.lock().await.insert(slot, t.clone());
         self.persist().await?;
         let m = self.clone();
+        let bg = t.clone();
         tokio::spawn(async move {
-            m.bring_up(t, true, false).await;
+            m.bring_up(bg, true, false).await;
         });
         Ok(t)
     }
@@ -368,7 +365,7 @@ impl Manager {
             avoid_map.insert(h.clone(), true);
         }
         order_candidates(
-            first,
+            &first,
             &region,
             prefer_current,
             s.conn.max_tries,
@@ -477,14 +474,17 @@ impl Manager {
             .iter()
             .map(|n| format!("{} 出口", node_label(n)))
             .collect();
-        let job = self.jobs.new_job(
-            if req.region.is_empty() {
-                format!("开 {} 个任意地区出口", picks.len())
-            } else {
-                format!("开 {} 个 {} 出口", picks.len(), req.region)
-            },
-            labels,
-        );
+        let job = self
+            .jobs
+            .new_job(
+                if req.region.is_empty() {
+                    format!("开 {} 个任意地区出口", picks.len())
+                } else {
+                    format!("开 {} 个 {} 出口", picks.len(), req.region)
+                },
+                labels,
+            )
+            .await;
         let mut tasks = Vec::new();
         for (i, node) in picks.into_iter().enumerate() {
             job.set(i, "running", &format!("正在连接 {}", node.hostname))
@@ -602,12 +602,14 @@ impl Manager {
         let mut out = Vec::new();
         for t in self.tunnels().await {
             let s = t.state().await;
+            let country = node_label(&s.node);
+            let aead = crate::nodes::node_supports_aead(&s.node.config);
             out.push(Exit {
                 slot: s.slot,
                 port: s.port,
                 host: s.node.hostname,
                 region: s.node.country_code,
-                country: node_label(&s.node),
+                country,
                 exit_ip: s.exit_ip,
                 status: s.status,
                 err: s.err,
@@ -617,7 +619,7 @@ impl Manager {
                 inbounds: Vec::new(),
                 warp_ip: String::new(),
                 warp_live: false,
-                aead: crate::nodes::node_supports_aead(&s.node.config),
+                aead,
             });
         }
         out
@@ -684,7 +686,6 @@ impl Manager {
                 if t.status().await != "up" {
                     continue;
                 }
-                let m = self.clone();
                 let sem = sem.clone();
                 tasks.push(tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.ok();
@@ -692,16 +693,20 @@ impl Manager {
                         return (t, false, why, true);
                     }
                     match t.runtime.probe_exit_ip().await {
-                        Ok(ip) => (
-                            t,
-                            ip == t.exit_ip().await,
-                            if ip == t.exit_ip().await {
-                                String::new()
-                            } else {
-                                format!("出口变成 {ip}")
-                            },
-                            false,
-                        ),
+                        Ok(ip) => {
+                            let expected = t.exit_ip().await;
+                            let same = ip == expected;
+                            (
+                                t,
+                                same,
+                                if same {
+                                    String::new()
+                                } else {
+                                    format!("出口变成 {ip}")
+                                },
+                                false,
+                            )
+                        }
                         Err(e) => (t, false, e.to_string(), false),
                     }
                 }));

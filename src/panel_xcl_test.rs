@@ -114,15 +114,15 @@ fn detection_requires_state_and_valid_object_config() {
     let state = dir.path().join("state");
     let path = dir.path().join("config.json");
 
-    let error = XCL::detect_at(&state, &path, ()).unwrap_err();
+    let error = XCL::detect_at(&state, &path, ()).err().unwrap();
     assert!(error.to_string().contains("状态目录"));
 
     fs::create_dir(&state).unwrap();
-    let error = XCL::detect_at(&state, &path, ()).unwrap_err();
+    let error = XCL::detect_at(&state, &path, ()).err().unwrap();
     assert!(error.to_string().contains("Xray 配置"));
 
     fs::write(&path, b"[]").unwrap();
-    let error = XCL::detect_at(&state, &path, ()).unwrap_err();
+    let error = XCL::detect_at(&state, &path, ()).err().unwrap();
     assert!(error.to_string().contains("JSON 对象"));
 
     fs::write(&path, b"{not-json").unwrap();
@@ -250,7 +250,8 @@ fn bind_cleans_stale_tags_and_rejects_unknown_inbounds_without_writing() {
     let before = fs::read(xcl.config_path()).unwrap();
     let error = xcl
         .bind_with_state("missing", "jp-01", &tunnels, &[])
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("入站 missing 不存在"));
     assert_eq!(fs::read(xcl.config_path()).unwrap(), before);
 
@@ -277,15 +278,18 @@ fn bind_validates_tunnel_and_pool_state() {
 
     let error = xcl
         .bind_with_state("vless-ws", "missing", &[], &[])
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("没有运行中的隧道"));
     let error = xcl
         .bind_with_state("vless-ws", "jp-down", &[down], &[])
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("当前 down"));
     let error = xcl
         .bind_with_state("vless-ws", "pool-1", &[], &[])
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("出口组 pool-1"));
     let error = xcl
         .bind_with_state(
@@ -294,7 +298,8 @@ fn bind_validates_tunnel_and_pool_state() {
             &[],
             &[pool("pool-1", 21001, false, 1)],
         )
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("监听没起来"));
 }
 
@@ -316,11 +321,13 @@ fn rebind_moves_all_matching_inbounds_and_reports_no_matches() {
     assert_eq!(bound["trojan-ws"], "us-02");
     let error = xcl
         .rebind_with_state("missing", "us-02", &tunnels, &[])
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("没有入站绑在 missing"));
     let error = xcl
         .rebind_with_state("jp-01", "", &tunnels, &[])
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("目标节点为空"));
 }
 
@@ -398,25 +405,27 @@ async fn panel_detail_links_close_and_node_mutations_match_go_policy() {
         .is_empty());
     assert!(xcl.inbound_detail("99999", "").await.is_err());
 
-    let create_error = xcl.create_inbound(&json!({})).await.unwrap_err();
+    let create_error = xcl.create_inbound(&json!({})).await.err().unwrap();
     assert_eq!(create_error.to_string(), XCL_READ_ONLY_ERROR);
     let clone_error = xcl
         .clone_to_tunnels("10001", &["jp-01".into()])
         .await
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert_eq!(clone_error.to_string(), XCL_READ_ONLY_ERROR);
-    let delete_error = xcl.delete_inbounds(&["10001".into()]).await.unwrap_err();
+    let delete_error = xcl.delete_inbounds(&["10001".into()]).await.err().unwrap();
     assert_eq!(delete_error.to_string(), XCL_READ_ONLY_ERROR);
     let update_error = xcl
         .update_inbound("10001", &InboundPatch::default())
         .await
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert_eq!(update_error.to_string(), XCL_READ_ONLY_ERROR);
-    let add_error = xcl.add_client("10001", "a@b").await.unwrap_err();
+    let add_error = xcl.add_client("10001", "a@b").await.err().unwrap();
     assert_eq!(add_error.to_string(), XCL_READ_ONLY_ERROR);
-    let delete_client_error = xcl.delete_client("10001", "a@b").await.unwrap_err();
+    let delete_client_error = xcl.delete_client("10001", "a@b").await.err().unwrap();
     assert_eq!(delete_client_error.to_string(), XCL_READ_ONLY_ERROR);
-    let reset_error = xcl.reset_client("10001", "a@b").await.unwrap_err();
+    let reset_error = xcl.reset_client("10001", "a@b").await.err().unwrap();
     assert_eq!(reset_error.to_string(), XCL_READ_ONLY_ERROR);
     xcl.close().await.unwrap();
     assert_eq!(fs::read(xcl.config_path()).unwrap(), before);
@@ -467,7 +476,8 @@ fn save_cfg_calls_injected_restart_and_propagates_terminal_failure() {
     xcl.restart_gate = Arc::new(RestartGate::new(0));
     let error = xcl
         .save_cfg(&json!({"inbounds": [], "saved": true}))
-        .unwrap_err();
+        .err()
+        .unwrap();
     assert!(error.to_string().contains("restart boom"));
     assert_eq!(read_cfg(&xcl)["saved"], true);
 }

@@ -37,7 +37,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/${{ matrix.rustarch }}-unknown-linux-gnu/release/fanout-rust dist/
-          cp README.md LICENSE dist/
+          cp README.md LICENSE install.sh f.sh fanout-rust.service dist/
           tar -czf fanout-rust-linux-${{ matrix.goarch }}.tar.gz -C dist .
       - uses: actions/upload-artifact@v4
         with:

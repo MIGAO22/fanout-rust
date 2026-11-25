@@ -1,9 +1,9 @@
 use super::*;
+use crate::models::HostStats;
 use crate::publicip::{
-    probe_sources, is_ipv4_or_mapped, resolve_public_ip, PublicIPState, IP_ORACLES,
+    is_ipv4_or_mapped, probe_sources, resolve_public_ip, PublicIPState, IP_ORACLES,
     PUBLIC_IP_SOURCES, PUBLIC_IP_TTL,
 };
-use crate::models::HostStats;
 use std::time::Duration;
 
 fn close(got: f64, want: f64) -> bool {
@@ -36,12 +36,21 @@ fn parse_cpu_times_rejects_junk() {
 
 #[test]
 fn cpu_pct_clamps_and_handles_zero_window() {
-    let same = CpuTimes { idle: 10, total: 10 };
+    let same = CpuTimes {
+        idle: 10,
+        total: 10,
+    };
     assert_eq!(cpu_pct(same, same), 0.0);
     assert_eq!(
         cpu_pct(
-            CpuTimes { idle: 500, total: 900 },
-            CpuTimes { idle: 100, total: 400 },
+            CpuTimes {
+                idle: 500,
+                total: 900
+            },
+            CpuTimes {
+                idle: 100,
+                total: 400
+            },
         ),
         0.0
     );
@@ -166,7 +175,10 @@ fn link_speed_fixture_and_missing_speed() {
         _ => None,
     });
     assert_eq!(total, 1000.0);
-    assert_eq!(link_mbps(&["iface-that-does-not-exist-xyz".to_string()]), 0.0);
+    assert_eq!(
+        link_mbps(&["iface-that-does-not-exist-xyz".to_string()]),
+        0.0
+    );
     assert_eq!(parse_link_speed(b"not a speed\n"), 0);
 }
 
@@ -174,7 +186,12 @@ fn link_speed_fixture_and_missing_speed() {
 fn net_rates_first_window_is_not_ready() {
     let now = Instant::now();
     let mut sample = NetCounters::default();
-    let (up, down, ready) = net_rates_at(devs(&[("eth0", 100, 40)]), &["eth0".into()], now, &mut sample);
+    let (up, down, ready) = net_rates_at(
+        devs(&[("eth0", 100, 40)]),
+        &["eth0".into()],
+        now,
+        &mut sample,
+    );
     assert_eq!((up, down, ready), (0.0, 0.0, false));
 }
 
@@ -252,11 +269,8 @@ fn disk_stat_guards_bad_counts() {
 #[cfg(unix)]
 #[test]
 fn read_disk_usage_falls_back_to_root() {
-    let (used, total, pct, mount) = read_disk_usage(&[
-        Path::new("/definitely-not-a-mount-point"),
-        Path::new("/"),
-    ])
-    .unwrap();
+    let (used, total, pct, mount) =
+        read_disk_usage(&[Path::new("/definitely-not-a-mount-point"), Path::new("/")]).unwrap();
     assert_eq!(mount, "/");
     assert!(total > 0 && used <= total);
     assert!((0.0..=100.0).contains(&pct));
@@ -294,10 +308,35 @@ fn host_stats_reads_real_proc_and_serializes_exact_shape() {
 
     let value = serde_json::to_value(HostStats::default()).unwrap();
     let expected = [
-        "cpu", "mem_pct", "mem_used", "mem_total", "swap_pct", "swap_used", "swap_total",
-        "disk_pct", "disk_used", "disk_total", "disk_mount", "load1", "load5", "load15",
-        "cores", "load_pct", "tcp", "tcp_pct", "udp", "udp_pct", "tcp6", "udp6",
-        "sock_cap", "up_bps", "down_bps", "up_pct", "down_pct", "net_ready", "net_if",
+        "cpu",
+        "mem_pct",
+        "mem_used",
+        "mem_total",
+        "swap_pct",
+        "swap_used",
+        "swap_total",
+        "disk_pct",
+        "disk_used",
+        "disk_total",
+        "disk_mount",
+        "load1",
+        "load5",
+        "load15",
+        "cores",
+        "load_pct",
+        "tcp",
+        "tcp_pct",
+        "udp",
+        "udp_pct",
+        "tcp6",
+        "udp6",
+        "sock_cap",
+        "up_bps",
+        "down_bps",
+        "up_pct",
+        "down_pct",
+        "net_ready",
+        "net_if",
         "link_mbps",
     ];
     let object = value.as_object().unwrap();
@@ -311,7 +350,11 @@ fn host_stats_reads_real_proc_and_serializes_exact_shape() {
 fn public_ip_source_lists_match_go() {
     assert_eq!(
         PUBLIC_IP_SOURCES,
-        ["https://api.ipify.org", "https://ipv4.icanhazip.com", "https://ifconfig.me/ip"]
+        [
+            "https://api.ipify.org",
+            "https://ipv4.icanhazip.com",
+            "https://ifconfig.me/ip"
+        ]
     );
     assert_eq!(
         IP_ORACLES,
@@ -329,7 +372,13 @@ fn public_ip_source_lists_match_go() {
 fn public_ip_validation_matches_parse_ip_to4() {
     assert!(is_ipv4_or_mapped("203.0.113.9"));
     assert!(is_ipv4_or_mapped("::ffff:203.0.113.9"));
-    for bad in ["", "not-an-ip", "203.0.113.999", "2001:db8::1", "127.0.0.1 extra"] {
+    for bad in [
+        "",
+        "not-an-ip",
+        "203.0.113.999",
+        "2001:db8::1",
+        "127.0.0.1 extra",
+    ] {
         assert!(!is_ipv4_or_mapped(bad), "accepted {bad:?}");
     }
 }

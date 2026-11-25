@@ -1,17 +1,18 @@
 use crate::models::SocksCred;
 use anyhow::Error as AnyhowError;
 use async_trait::async_trait;
+use futures::FutureExt;
 use std::{
     collections::HashMap,
     error::Error,
     fmt,
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
 };
 use subtle::ConstantTimeEq;
 use tokio::{
     io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{Ipv4Addr, TcpStream, UdpSocket},
+    net::{TcpStream, UdpSocket},
     sync::Mutex,
     task::JoinSet,
     time::{timeout, timeout_at, Duration, Instant},
@@ -345,8 +346,8 @@ where
     let (mut a_read, mut a_write) = io::split(a);
     let (mut b_read, mut b_write) = io::split(b);
     tokio::select! {
-        result = io::copy(&mut a_read, &mut b_write) => result,
-        result = io::copy(&mut b_read, &mut a_write) => result,
+        result = io::copy(&mut a_read, &mut b_write).map(|r| r.map(|_| ())) => result,
+        result = io::copy(&mut b_read, &mut a_write).map(|r| r.map(|_| ())) => result,
     }
 }
 
@@ -457,7 +458,7 @@ where
         }
     };
     let bnd_ip = match local {
-        SocketAddr::V4(local) if !local.ip().is_unspecified() => local.ip(),
+        SocketAddr::V4(local) if !local.ip().is_unspecified() => *local.ip(),
         SocketAddr::V6(local) => local
             .ip()
             .to_ipv4_mapped()

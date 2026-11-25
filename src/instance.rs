@@ -173,9 +173,9 @@ pub fn host_used_net_bases() -> BTreeSet<u8> {
     let Ok(out) = output_command("ip", &args) else {
         return used;
     };
-    used.extend(parse_host_used_net_bases(
-        &String::from_utf8_lossy(&out.stdout),
-    ));
+    used.extend(parse_host_used_net_bases(&String::from_utf8_lossy(
+        &out.stdout,
+    )));
     used
 }
 
@@ -230,7 +230,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn absolute_clean_handles_legacy_spellings() {
-        assert_eq!(absolute_clean(Path::new(DEFAULT_WORK_DIR)), Path::new(DEFAULT_WORK_DIR));
+        assert_eq!(
+            absolute_clean(Path::new(DEFAULT_WORK_DIR)),
+            Path::new(DEFAULT_WORK_DIR)
+        );
         assert_eq!(
             absolute_clean(Path::new("/var/lib/fanout/")),
             Path::new(DEFAULT_WORK_DIR)

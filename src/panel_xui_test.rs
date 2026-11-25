@@ -259,7 +259,7 @@ fn uri_links_match_query_or_fragment_and_replace_only_localhost() {
         fixed,
         "vless://uuid@1.2.3.4:26387?security=none&type=tcp#t-tcp"
     );
-    assert!(link_for_port(link, 99_999, "1.2.3.4").is_none());
+    assert!(link_for_port(link, 0, "1.2.3.4").is_none());
 
     let fragment = "trojan://pass@localhost:443#name";
     assert!(link_for_port(fragment, 443, "host.test")
@@ -280,6 +280,10 @@ fn malformed_vmess_falls_back_to_uri_port_matching() {
     );
     let invalid_json = format!("vmess://{}", BASE64_STANDARD.encode(b"not-json"));
     assert!(link_for_port(&invalid_json, 1234, "host").is_none());
+    for valid_non_object in ["[]", "42", "null"] {
+        let link = format!("vmess://{}", BASE64_STANDARD.encode(valid_non_object));
+        assert!(link_for_port(&link, 1234, "host").is_none());
+    }
 }
 
 #[test]

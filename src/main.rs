@@ -3,9 +3,12 @@ mod appstate;
 mod auth;
 mod config;
 mod factory;
+mod hoststats;
+mod instance;
 mod jobs;
 mod manager;
 mod models;
+mod netns;
 mod nodecache;
 mod nodes;
 mod panel;
@@ -13,10 +16,13 @@ mod panel_native;
 mod panel_xcl;
 mod panel_xui;
 mod pools_logic;
+mod process;
+mod publicip;
 mod runtime;
 mod socks5;
 mod state;
 mod sub;
+mod tunnel_runtime;
 mod util;
 mod warp_logic;
 mod web;
@@ -102,6 +108,11 @@ async fn main() -> Result<()> {
         args.web.unwrap_or(config::DEFAULT_PORT),
         port_explicit,
     )?;
+    let instance = instance::Instance::init(&dir)?;
+    process::init_main_netns()?;
+    if let Some(ip) = args.ip.as_ref() {
+        publicip::set_public_ip_override(ip);
+    }
     let auth = auth::Auth::load(&dir)?.0;
     let (basepath, base_created) = auth::load_basepath(&dir)?;
     if base_created {
@@ -109,13 +120,18 @@ async fn main() -> Result<()> {
     }
 
     let settings = Arc::new(RwLock::new(settings));
+    let listen_addr = settings.read().await.listen_addr.clone();
+    let web_port = settings.read().await.port;
     let jobs = jobs::JobStore::new();
     let manager = manager::Manager::new(
         dir.clone(),
         args.max.unwrap_or(20),
-        settings,
+        settings.clone(),
         jobs,
-        Arc::new(factory::UnavailableFactory),
+        Arc::new(tunnel_runtime::LinuxTunnelFactory {
+            instance,
+            settings: settings.clone(),
+        }),
     );
     let state = Arc::new(appstate::AppState {
         auth,
@@ -139,12 +155,7 @@ async fn main() -> Result<()> {
     if !tag.is_empty() {
         tracing::info!("非默认工作目录，本实例用 netns fo{tag}*");
     }
-    tracing::info!(
-        "管理界面: http://{}:{}/{}",
-        settings.listen_addr,
-        settings.port,
-        basepath
-    );
+    tracing::info!("管理界面: http://{}:{}/{}", listen_addr, web_port, basepath);
     tracing::info!("Rust 重构版 v{VERSION}，Go 版功能正在逐模块移植");
 
     let mut app = Router::new()

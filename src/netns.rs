@@ -1,13 +1,18 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::{
     collections::BTreeSet,
-    fs::{self, File},
-    io,
-    net::{Ipv4Addr, SocketAddr, TcpStream as StdTcpStream, ToSocketAddrs, UdpSocket as StdUdpSocket},
-    path::Path,
+    fs, io,
+    net::{
+        IpAddr, Ipv4Addr, SocketAddr, TcpStream as StdTcpStream, ToSocketAddrs,
+        UdpSocket as StdUdpSocket,
+    },
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(target_os = "linux")]
+use std::{fs::File, path::Path};
 
 use tokio::{
     net::{TcpStream, UdpSocket},
@@ -17,9 +22,14 @@ use tokio::{
 
 use crate::{
     instance::Instance,
-    process::{combined_output_command, enter_netns, output_command, run_command, run_formatted, run_quiet, OvpnProc},
+    process::{
+        combined_output_command, output_command, run_command, run_formatted, run_quiet, OvpnProc,
+    },
     util::write_file,
 };
+
+#[cfg(target_os = "linux")]
+use crate::process::enter_netns;
 
 pub const SOCKS_DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 const NETNS_ROOT: &str = "/var/run/netns";
@@ -48,7 +58,14 @@ pub fn netns_direct_cmds(input: NetnsDirect) -> Vec<Vec<String>> {
 
     let mut addresses = BTreeSet::new();
     for value in input.ips {
-        if let Ok(address) = value.parse::<Ipv4Addr>() {
+        let address = match value.parse::<IpAddr>() {
+            Ok(IpAddr::V4(address)) => Some(address),
+            // Match Go's net.ParseIP(...).To4(): IPv4-mapped literals are
+            // normalized to their IPv4 route rather than emitted as invalid v6.
+            Ok(IpAddr::V6(address)) => address.to_ipv4_mapped(),
+            Err(_) => None,
+        };
+        if let Some(address) = address {
             addresses.insert(address.to_string());
         }
     }
@@ -182,7 +199,15 @@ impl Netns {
         )?;
 
         let ns_dir = Path::new("/etc/netns").join(&name);
-        fs::create_dir_all(&ns_dir)
+        let mut directory = fs::DirBuilder::new();
+        directory.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            directory.mode(0o755);
+        }
+        directory
+            .create(&ns_dir)
             .with_context(|| format!("创建 {} 失败", ns_dir.display()))?;
         write_file(ns_dir.join("resolv.conf"), NETNS_RESOLV_CONF, 0o644)
             .context("写 resolv.conf 失败")?;
@@ -203,11 +228,7 @@ impl Netns {
         }
 
         let cidr = self.subnet_cidr();
-        ensure_rule(
-            "nat",
-            "POSTROUTING",
-            &["-s", &cidr, "-j", "MASQUERADE"],
-        );
+        ensure_rule("nat", "POSTROUTING", &["-s", &cidr, "-j", "MASQUERADE"]);
         ensure_rule_insert("filter", "FORWARD", &["-s", &cidr, "-j", "ACCEPT"]);
         ensure_rule_insert("filter", "FORWARD", &["-d", &cidr, "-j", "ACCEPT"]);
         Ok(())
@@ -249,7 +270,7 @@ impl Netns {
     }
 }
 
-fn strings(parts: impl AsRef<[&str]>) -> Vec<String> {
+fn strings<'a>(parts: impl AsRef<[&'a str]>) -> Vec<String> {
     parts
         .as_ref()
         .iter()
@@ -381,6 +402,10 @@ impl NetnsDialer {
         }
     }
 
+    pub async fn dial_tcp_host(&self, host: impl Into<String>, port: u16) -> Result<TcpStream> {
+        self.dial_tcp((host.into(), port)).await
+    }
+
     pub async fn dial_tcp<A>(&self, address: A) -> Result<TcpStream>
     where
         A: ToSocketAddrs + Send + 'static,
@@ -392,9 +417,14 @@ impl NetnsDialer {
             .await
             .map_err(|_| anyhow!("在 netns {namespace} 内 TCP 拨号超时"))?
             .context("netns 拨号线程异常退出")?;
-        let stream = stream.map_err(|error| anyhow!("在 netns {namespace} 内 TCP 连接失败: {error}"))?;
+        let stream =
+            stream.map_err(|error| anyhow!("在 netns {namespace} 内 TCP 连接失败: {error}"))?;
         TcpStream::from_std(stream)
             .with_context(|| format!("在 netns {namespace} 内创建 Tokio TCP socket 失败"))
+    }
+
+    pub async fn dial_udp_host(&self, host: impl Into<String>, port: u16) -> Result<UdpSocket> {
+        self.dial_udp((host.into(), port)).await
     }
 
     pub async fn dial_udp<A>(&self, address: A) -> Result<UdpSocket>
@@ -403,12 +433,13 @@ impl NetnsDialer {
     {
         let budget = self.timeout;
         let namespace = self.namespace.clone();
-        let mut receiver = self.spawn_in_netns(move || connect_udp(address))?;
+        let mut receiver = self.spawn_in_netns(move || connect_udp(address, budget))?;
         let socket = timeout(budget, &mut receiver)
             .await
             .map_err(|_| anyhow!("在 netns {namespace} 内 UDP 拨号超时"))?
             .context("netns 拨号线程异常退出")?;
-        let socket = socket.map_err(|error| anyhow!("在 netns {namespace} 内 UDP 连接失败: {error}"))?;
+        let socket =
+            socket.map_err(|error| anyhow!("在 netns {namespace} 内 UDP 连接失败: {error}"))?;
         UdpSocket::from_std(socket)
             .with_context(|| format!("在 netns {namespace} 内创建 Tokio UDP socket 失败"))
     }
@@ -465,11 +496,14 @@ impl NetnsDialer {
                         return;
                     }
                     restore.armed = true;
+                    if sender.is_closed() {
+                        return;
+                    }
 
                     let result = operation();
                     if let Err(error) = enter_netns(&restore.origin) {
                         // The socket, if any, is dropped by `result`. This thread
-                        // exits in the foreign namespace and is never reused.
+                        // is never reused; Drop makes one best-effort restore retry.
                         let error = io::Error::new(
                             error.kind(),
                             format!("恢复原网络命名空间失败: {error}"),
@@ -495,7 +529,10 @@ struct RestoreOnDrop {
 #[cfg(target_os = "linux")]
 impl RestoreOnDrop {
     fn new(origin: File) -> Self {
-        Self { origin, armed: false }
+        Self {
+            origin,
+            armed: false,
+        }
     }
 }
 
@@ -510,7 +547,35 @@ impl Drop for RestoreOnDrop {
     }
 }
 
-fn resolve_ipv4<A: ToSocketAddrs>(address: A) -> io::Result<Vec<SocketAddr>> {
+fn resolve_ipv4<A: ToSocketAddrs + Send + 'static>(
+    address: A,
+    budget: Duration,
+) -> io::Result<Vec<SocketAddr>> {
+    if budget.is_zero() {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, "DNS 解析超时"));
+    }
+
+    // std's resolver has no cancellation API. Run it on a disposable thread
+    // and bound the wait, so the setns thread can still restore the host even
+    // when getaddrinfo stalls. The resolver inherits the target namespace and
+    // is never returned to a worker pool.
+    let (sender, receiver) = mpsc::channel();
+    thread::Builder::new()
+        .name("fanout-netns-dns".into())
+        .spawn(move || {
+            let _ = sender.send(resolve_ipv4_now(address));
+        })
+        .map_err(io::Error::other)?;
+    receiver.recv_timeout(budget).unwrap_or_else(|error| {
+        let kind = match error {
+            mpsc::RecvTimeoutError::Timeout => io::ErrorKind::TimedOut,
+            mpsc::RecvTimeoutError::Disconnected => io::ErrorKind::Other,
+        };
+        Err(io::Error::new(kind, format!("DNS 解析失败: {error}")))
+    })
+}
+
+fn resolve_ipv4_now<A: ToSocketAddrs>(address: A) -> io::Result<Vec<SocketAddr>> {
     let addresses: Vec<SocketAddr> = address
         .to_socket_addrs()?
         .filter(|address| matches!(address, SocketAddr::V4(_)))
@@ -524,9 +589,13 @@ fn resolve_ipv4<A: ToSocketAddrs>(address: A) -> io::Result<Vec<SocketAddr>> {
     Ok(addresses)
 }
 
-fn connect_tcp<A: ToSocketAddrs>(address: A, budget: Duration) -> io::Result<StdTcpStream> {
-    let addresses = resolve_ipv4(address)?;
+fn connect_tcp<A: ToSocketAddrs + Send + 'static>(
+    address: A,
+    budget: Duration,
+) -> io::Result<StdTcpStream> {
     let deadline = Instant::now() + budget;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let addresses = resolve_ipv4(address, remaining)?;
     let mut last_error = None;
     for address in addresses {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -538,13 +607,20 @@ fn connect_tcp<A: ToSocketAddrs>(address: A, budget: Duration) -> io::Result<Std
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| {
-        io::Error::new(io::ErrorKind::AddrNotAvailable, "目标没有 IPv4 地址")
-    }))
+    Err(last_error
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "目标没有 IPv4 地址")))
 }
 
-fn connect_udp<A: ToSocketAddrs>(address: A) -> io::Result<StdUdpSocket> {
-    let addresses = resolve_ipv4(address)?;
+fn connect_udp<A: ToSocketAddrs + Send + 'static>(
+    address: A,
+    budget: Duration,
+) -> io::Result<StdUdpSocket> {
+    let deadline = Instant::now() + budget;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let addresses = resolve_ipv4(address, remaining)?;
+    if deadline.saturating_duration_since(Instant::now()).is_zero() {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, "UDP 拨号超时"));
+    }
     let address = addresses
         .into_iter()
         .next()
@@ -564,7 +640,9 @@ pub fn tun0_up(namespace: &str) -> bool {
 
     #[cfg(target_os = "linux")]
     {
-        let args = strings(["netns", "exec", namespace, "ip", "-4", "addr", "show", "tun0"]);
+        let args = strings([
+            "netns", "exec", namespace, "ip", "-4", "addr", "show", "tun0",
+        ]);
         output_command("ip", &args)
             .map(|output| String::from_utf8_lossy(&output.stdout).contains("inet "))
             .unwrap_or(false)
@@ -581,7 +659,9 @@ pub fn netns_has_default(namespace: &str) -> bool {
 
     #[cfg(target_os = "linux")]
     {
-        let args = strings(["netns", "exec", namespace, "ip", "-o", "route", "show", "default"]);
+        let args = strings([
+            "netns", "exec", namespace, "ip", "-o", "route", "show", "default",
+        ]);
         combined_output_command("ip", &args)
             .map(|output| route_has_default(&String::from_utf8_lossy(&output.stdout)))
             .unwrap_or(false)

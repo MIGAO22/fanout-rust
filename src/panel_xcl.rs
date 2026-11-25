@@ -264,7 +264,7 @@ impl XCL {
         else {
             return bound;
         };
-        for rule in rules {
+        for mut rule in rules {
             let Some(rule) = rule.as_object() else {
                 continue;
             };
@@ -295,7 +295,7 @@ impl XCL {
             _ => Vec::new(),
         };
         let mut kept = Vec::with_capacity(existing.len() + tunnels.len() + pools.len());
-        for outbound in existing {
+        for mut outbound in existing {
             let is_fanout = outbound
                 .as_object()
                 .and_then(|outbound| outbound.get("tag"))
@@ -373,7 +373,7 @@ impl XCL {
             _ => Vec::new(),
         };
         let mut cleaned = Vec::with_capacity(rules.len() + 1);
-        for rule in rules {
+        for mut rule in rules {
             let is_fanout = rule
                 .as_object()
                 .and_then(|rule| rule.get("outboundTag"))

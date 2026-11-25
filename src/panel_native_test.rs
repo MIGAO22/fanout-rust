@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 use std::collections::HashSet;
 
-fn client() -> NativeClient {
+fn make_client() -> NativeClient {
     NativeClient {
         email: "e".into(),
         id: "uuid-1".into(),
@@ -19,7 +19,7 @@ fn inbound(port: u16) -> NativeInbound {
         protocol: "vless".into(),
         enable: true,
         remark: "r".into(),
-        clients: vec![client()],
+        clients: vec![make_client()],
         ..NativeInbound::default()
     }
 }
@@ -90,6 +90,15 @@ fn native_json_schema_round_trips_without_losing_security() {
         "/tmp/demo.crt"
     );
     assert_eq!(decoded.inbounds[0].clients[0].id, "uuid-1");
+}
+
+#[test]
+fn native_json_accepts_go_null_slices() {
+    let store: NativeStore = serde_json::from_str(r#"{"next_id":0,"inbounds":null}"#).unwrap();
+    assert_eq!(store.next_id, 0);
+    assert!(store.inbounds.is_empty());
+    let inbound: NativeInbound = serde_json::from_str(r#"{"clients":null}"#).unwrap();
+    assert!(inbound.clients.is_empty());
 }
 
 #[test]
@@ -321,7 +330,7 @@ fn xray_config_binds_only_live_tunnels_and_keeps_pool_fail_closed() {
 
 #[test]
 fn share_links_use_protocol_credentials_and_transport_parameters() {
-    let vless = share_link(&inbound(100), &client(), "1.2.3.4");
+    let vless = share_link(&inbound(100), &make_client(), "1.2.3.4");
     assert_eq!(
         vless,
         "vless://uuid-1@1.2.3.4:100?encryption=none&security=none&type=tcp#r"
@@ -331,7 +340,7 @@ fn share_links_use_protocol_credentials_and_transport_parameters() {
     trojan.protocol = "trojan".into();
     trojan.network = "ws".into();
     trojan.path = "/p".into();
-    let link = share_link(&trojan, &client(), "h");
+    let link = share_link(&trojan, &make_client(), "h");
     assert!(link.starts_with("trojan://pw-1@h:200?"));
     assert!(link.contains("path=%2Fp"));
     assert!(link.contains("security=none"));
@@ -339,15 +348,15 @@ fn share_links_use_protocol_credentials_and_transport_parameters() {
 
     let mut vmess = inbound(300);
     vmess.protocol = "vmess".into();
-    let link = share_link(&vmess, &client(), "h");
+    let link = share_link(&vmess, &make_client(), "h");
     assert!(link.starts_with("vmess://uuid-1@h:300?"));
     assert!(link.contains("encryption=auto"));
 }
 
 #[test]
 fn share_links_carry_reality_and_self_signed_tls_pins() {
-    let mut client = client();
-    client.flow = "xtls-rprx-vision".into();
+    let mut native_client = make_client();
+    native_client.flow = "xtls-rprx-vision".into();
     let mut ib = inbound(100);
     ib.security = "reality".into();
     ib.reality = Some(RealityConfig {
@@ -358,7 +367,7 @@ fn share_links_carry_reality_and_self_signed_tls_pins() {
         fingerprint: "chrome".into(),
         ..Default::default()
     });
-    let link = share_link(&ib, &client, "h");
+    let link = share_link(&ib, &native_client, "h");
     for expected in [
         "pbk=PBK",
         "sid=sid1",
@@ -377,7 +386,7 @@ fn share_links_carry_reality_and_self_signed_tls_pins() {
         cert_sha256: "AABB".into(),
         ..Default::default()
     });
-    let link = share_link(&ib, &client(), "h");
+    let link = share_link(&ib, &make_client(), "h");
     assert!(link.contains("sni=demo.local"));
     assert!(link.contains("pinSHA256=AABB"));
     assert!(!link.contains("allowInsecure"));
@@ -399,10 +408,13 @@ fn generated_labels_are_unique_and_only_auto_names_are_renamed() {
     assert_eq!(rename_exit_label("线路A", "new"), "线路A");
     assert_eq!(rename_exit_label(&label, ""), label);
 
-    let exit = Exit {
-        host: "jp-host".into(),
-        country_code: "JP".into(),
-        country: "Japan".into(),
+    let exit = TunnelState {
+        node: crate::models::Node {
+            hostname: "jp-host".into(),
+            country_code: "JP".into(),
+            country: "Japan".into(),
+            ..Default::default()
+        },
         exit_ip: "203.0.113.54".into(),
         ..Default::default()
     };

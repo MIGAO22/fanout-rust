@@ -191,7 +191,7 @@ impl PoolStore {
     pub fn save(&self, dir: impl AsRef<Path>) -> Result<()> {
         let path = pool_state_path(dir);
         let blob = serde_json::to_vec_pretty(self).context("序列化出口组存档失败")?;
-        crate::util::atomic_write(&path, blob, 0o600)
+        crate::util::atomic_write(&path, &blob, 0o600)
             .with_context(|| format!("保存 {} 失败", path.display()))
     }
 }
@@ -474,7 +474,7 @@ impl PoolPolicy {
     }
 }
 
-pub fn member_of(members: &[PoolMember], host: &str) -> Option<&PoolMember> {
+pub fn member_of<'a>(members: &'a [PoolMember], host: &str) -> Option<&'a PoolMember> {
     members.iter().find(|member| member.host == host)
 }
 
@@ -675,6 +675,7 @@ pub fn pool_view(
         total: members.len(),
         socks_user: pool.cred.user.clone(),
         socks_pass: pool.cred.pass.clone(),
+        cred: pool.cred.clone(),
         members: members
             .iter()
             .map(|member| pool_member_view(member, aead_hosts.contains(&member.host)))

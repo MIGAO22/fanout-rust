@@ -68,11 +68,7 @@ pub fn host_public_ip() -> String {
     resolve_public_ip(&PUBLIC_IP_STATE, probe_public_ip, Instant::now())
 }
 
-pub(crate) fn resolve_public_ip<F>(
-    state: &Mutex<PublicIPState>,
-    probe: F,
-    now: Instant,
-) -> String
+pub(crate) fn resolve_public_ip<F>(state: &Mutex<PublicIPState>, probe: F, now: Instant) -> String
 where
     F: FnOnce() -> String,
 {

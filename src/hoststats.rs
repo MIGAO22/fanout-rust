@@ -54,7 +54,7 @@ fn parse_cpu_times(blob: &[u8]) -> Result<CpuTimes> {
                 out.total = out.total.wrapping_add(value);
             }
             // iowait is idle time for the purpose of this display.
-            if i == 3 || i == 4 {
+            if i == 4 || i == 5 {
                 out.idle = out.idle.wrapping_add(value);
             }
         }

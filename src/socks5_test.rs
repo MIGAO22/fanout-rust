@@ -41,7 +41,7 @@ async fn parses_domain_udp_associate_request() {
         CMD_UDP_ASSOCIATE,
         0,
         ATYP_DOMAIN,
-        7,
+        11,
         b'e',
         b'x',
         b'a',
@@ -49,6 +49,10 @@ async fn parses_domain_udp_associate_request() {
         b'p',
         b'l',
         b'e',
+        b'.',
+        b'c',
+        b'o',
+        b'm',
         0,
         53,
     ];
@@ -284,7 +288,7 @@ fn builds_udp_response_header() {
     let packet = build_udp_resp_header(ATYP_IPV4, &[8, 8, 8, 8], 53, &[1, 2]);
     assert_eq!(packet, [0, 0, 0, ATYP_IPV4, 8, 8, 8, 8, 0, 53, 1, 2]);
 
-    let packet = build_udp_resp_header(ATYP_DOMAIN, b"dns", 35, &[9]);
+    let packet = build_udp_resp_header(ATYP_DOMAIN, &[3, b'd', b'n', b's'], 35, &[9]);
     assert_eq!(
         packet,
         [0, 0, 0, ATYP_DOMAIN, 3, b'd', b'n', b's', 0, 35, 9]
@@ -368,7 +372,7 @@ async fn request_failures_use_expected_reply_codes() {
     for (request, code, error) in cases {
         let (response, result) = serve_exchange(request, 12).await;
         assert_eq!(&response[..2], &[5, AUTH_NONE]);
-        assert_eq!(response[2], 0);
+        assert_eq!(response[2], 5);
         assert_eq!(response[3], code);
         assert_eq!(&response[4..], &[0, 0, 0, 0, 0, 0]);
         assert_eq!(result.unwrap_err().to_string(), error);

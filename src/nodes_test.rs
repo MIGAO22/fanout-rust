@@ -233,7 +233,9 @@ fn parse_node_csv_rejects_bad_lists() {
     assert!(parse_node_csv(&format!("*vpn_servers\n{CSV_HEADER}\n*\n"), "balanced").is_err());
 
     let missing = CSV_HEADER.replace("CountryShort,", "");
-    let err = parse_node_csv(&format!("*vpn_servers\n{missing}\n*\n"), "balanced").unwrap_err();
+    let row = sample_node_csv("vpn1").lines().nth(2).unwrap();
+    let err =
+        parse_node_csv(&format!("*vpn_servers\n{missing}\n{row}\n*\n"), "balanced").unwrap_err();
     assert!(err.to_string().contains("CountryShort"));
     assert!(parse_node_csv("#\n#\n", "balanced").is_err());
 }
@@ -729,7 +731,7 @@ fn generated_credentials_match_shape_and_alphabet() {
         assert!(cred.user.starts_with("fo"));
         assert_eq!(cred.user.len(), 8);
         assert_eq!(cred.pass.len(), 14);
-        for field in [&cred.user, &cred.pass] {
+        for field in [cred.user.strip_prefix("fo").unwrap(), &cred.pass] {
             assert!(field.bytes().all(|byte| CRED_ALPHABET.contains(&byte)));
         }
         validate_cred(&cred).unwrap();

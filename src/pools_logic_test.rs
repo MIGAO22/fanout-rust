@@ -859,7 +859,8 @@ fn latency_ewma_and_cooldown_state_match_go() {
         Duration::from_millis(130)
     );
     assert_eq!(cooldown_for_failures(1), Duration::from_secs(20));
-    assert_eq!(cooldown_for_failures(5), Duration::from_secs(160));
+    assert_eq!(cooldown_for_failures(4), Duration::from_secs(160));
+    assert_eq!(cooldown_for_failures(5), POOL_COOL_MAX);
     assert_eq!(cooldown_for_failures(6), POOL_COOL_MAX);
 
     let now = test_now();

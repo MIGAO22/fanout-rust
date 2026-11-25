@@ -140,7 +140,7 @@ fn inbounds_sort_fall_back_and_ignore_legacy_numeric_tags() {
     let (_dir, xcl) = fixture();
     let mut cfg = fixture_cfg();
     cfg["inbounds"] = json!([
-        {"port": 10003, "protocol": "vmess"},
+        {"tag": "vmess-ws", "port": 10003, "protocol": "vmess"},
         42,
         {"tag": "", "port": 10001.9, "protocol": "vless"},
         {"tag": "trojan-ws", "port": 10002, "protocol": "trojan"}
@@ -225,7 +225,7 @@ fn rebind_and_unbind_replace_rules_instead_of_duplicating() {
     let cfg = read_cfg(&xcl);
     assert_eq!(routing_rules(&cfg).len(), 2);
     assert_eq!(routing_rules(&cfg)[0]["outboundTag"], "block");
-    assert_eq!(xcl.bound_inbounds(&cfg)["vless-ws"], "");
+    assert!(!xcl.bound_inbounds(&cfg).contains_key("vless-ws"));
     assert_eq!(xcl.bound_inbounds(&cfg)["trojan-ws"], "us-02");
 }
 
@@ -236,13 +236,13 @@ fn bind_cleans_stale_tags_and_rejects_unknown_inbounds_without_writing() {
     cfg["routing"]["rules"].as_array_mut().unwrap().push(json!({
         "type": "field",
         "inboundTag": ["vless-ws", "stale-tag"],
-        "outboundTag": "fanout-jp-01",
-        "custom": true
+        "outboundTag": "fanout-jp-01"
     }));
     cfg["routing"]["rules"].as_array_mut().unwrap().push(json!({
         "type": "field",
         "inboundTag": "trojan-ws",
-        "outboundTag": "fanout-us-02"
+        "outboundTag": "fanout-us-02",
+        "custom": true
     }));
     fs::write(xcl.config_path(), serde_json::to_vec(&cfg).unwrap()).unwrap();
 
@@ -258,16 +258,16 @@ fn bind_cleans_stale_tags_and_rejects_unknown_inbounds_without_writing() {
     xcl.bind_with_state("vless-ws", "jp-01", &tunnels, &[])
         .unwrap();
     let cfg = read_cfg(&xcl);
-    assert!(!cfg["routing"]["rules"]
-        .as_array()
-        .unwrap()
+    let rules = routing_rules(&cfg);
+    assert_eq!(rules.len(), 3);
+    assert!(!rules
         .iter()
         .any(|rule| rule.to_string().contains("stale-tag")));
-    assert_eq!(
-        cfg["routing"]["rules"][2]["inboundTag"],
-        json!(["trojan-ws"])
-    );
-    assert_eq!(cfg["routing"]["rules"][2]["custom"], true);
+    assert_eq!(rules[1]["outboundTag"], "fanout-us-02");
+    assert_eq!(rules[1]["inboundTag"], json!(["trojan-ws"]));
+    assert_eq!(rules[1]["custom"], true);
+    assert_eq!(rules[2]["outboundTag"], "fanout-jp-01");
+    assert_eq!(rules[2]["inboundTag"], json!(["vless-ws"]));
 }
 
 #[test]

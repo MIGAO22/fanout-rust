@@ -397,7 +397,7 @@ impl PoolPolicy {
                 .map(|member| member.host)
                 .unwrap_or_else(|| available[0].host.clone())
         } else {
-            let step = self.step.max(POOL_DEFAULT_RR_STEP);
+            let step = self.step;
             let index = (self.cursor / step) % available.len();
             let host = available[index].host.clone();
             self.cursor = self.cursor.wrapping_add(1);

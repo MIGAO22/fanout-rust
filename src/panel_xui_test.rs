@@ -321,7 +321,6 @@ async fn inbound_spec_defaults_and_validation_match_native_rules() {
         "network": " WS ",
         "port": 12_345,
         "security": " TLS ",
-        "vision": true,
         "path": "/fixed",
         "remark": " 测试 ",
         "sni": "panel.example.com",
@@ -337,6 +336,20 @@ async fn inbound_spec_defaults_and_validation_match_native_rules() {
     assert_eq!(normalized.remark, "测试");
     assert_eq!(normalized.server_name, "panel.example.com");
     assert!(normalized.flow.is_empty());
+
+    let vision = normalize_inbound_spec(
+        &json!({
+            "protocol": "vless",
+            "network": "tcp",
+            "security": "reality",
+            "vision": true,
+            "port": 12_346,
+        }),
+        &HashSet::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(vision.flow, "xtls-rprx-vision");
 
     assert!(
         normalize_inbound_spec(&json!({"protocol": "ss", "port": 1}), &HashSet::new())

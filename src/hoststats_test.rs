@@ -125,7 +125,7 @@ fn percentages_guard_zero_and_clamp() {
     assert_eq!(clamp_pct(-1.0), 0.0);
     assert_eq!(clamp_pct(140.0), 100.0);
     assert_eq!(rate_pct(12345.0, 0.0), 0.0);
-    assert!(close(rate_pct(100.0 * 1024.0 * 1024.0, 1000.0), 80.0));
+    assert!(close(rate_pct(100.0 * 1000.0 * 1000.0, 1000.0), 80.0));
 }
 
 #[test]

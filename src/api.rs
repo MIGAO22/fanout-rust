@@ -1,4 +1,3 @@
-use anyhow::Result;
 use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, StatusCode},
@@ -6,7 +5,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
@@ -38,7 +37,7 @@ pub async fn exits(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         backend: "native".into(),
         panel_info: "fanout-rust 自建 Xray".into(),
         public_ip: crate::publicip::host_public_ip(),
-        warp: WarpOverview::default(),
+        warp: warp_overview(&state).await,
     })
 }
 
@@ -188,8 +187,52 @@ pub async fn pools() -> impl IntoResponse {
     Json(json!({"pools": [], "modes": [], "rr_step": 5, "max_hosts": 32}))
 }
 
-pub async fn warp() -> impl IntoResponse {
-    Json(WarpOverview::default())
+async fn warp_overview(state: &AppState) -> WarpOverview {
+    let mut overview = state.warp.overview().await;
+    for t in state.manager.tunnels().await {
+        if t.status().await == "up" && t.runtime.transit_status().await.1 {
+            overview.live += 1;
+        }
+    }
+    overview
+}
+
+pub async fn warp_get(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(warp_overview(&state).await)
+}
+
+#[derive(Deserialize)]
+pub struct WarpQuery {
+    pub on: String,
+}
+
+pub async fn warp_set(State(state): State<Arc<AppState>>, Query(q): Query<WarpQuery>) -> Response {
+    let on = matches!(q.on.as_str(), "1" | "true");
+    if !matches!(q.on.as_str(), "1" | "true" | "0" | "false") {
+        return error(StatusCode::BAD_REQUEST, "on 只能是 1 或 0");
+    }
+    let mut settings = state.manager.settings().await;
+    settings.warp = Some(crate::config::WarpSettings {
+        enabled: on,
+        ..settings.warp.unwrap_or_default()
+    });
+    if let Err(e) = state.manager.update_settings(settings).await {
+        return internal(e);
+    }
+    if !on {
+        if let Err(e) = state.warp.drop_all().await {
+            tracing::warn!("撤销 WARP 注册失败: {e}");
+        }
+    }
+    for t in state.manager.tunnels().await {
+        let old = t.host().await;
+        state.manager.reconnect(t, old).await;
+    }
+    Json(json!({
+        "ok": true,
+        "enabled": on,
+        "message": if on { "中转已开启，正在把出口逐条接进 Cloudflare" } else { "中转已关闭，正在把出口逐条接回直连" }
+    })).into_response()
 }
 
 pub async fn stats(State(state): State<Arc<AppState>>) -> Response {
@@ -215,10 +258,6 @@ pub async fn xui_status() -> impl IntoResponse {
 
 pub async fn not_implemented() -> impl IntoResponse {
     error(StatusCode::NOT_IMPLEMENTED, "Rust 版正在移植")
-}
-
-pub async fn ok() -> impl IntoResponse {
-    Json(json!({"ok": true}))
 }
 
 pub async fn sub() -> impl IntoResponse {
@@ -355,6 +394,3 @@ pub async fn update_check() -> impl IntoResponse {
         "url": "https://github.com/MIGAO22/fanout-rust/releases/latest"
     }))
 }
-
-pub type SharedManager = Arc<Manager>;
-pub type EmptyQuery = HashMap<String, String>;

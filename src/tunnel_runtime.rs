@@ -27,7 +27,11 @@ use crate::{
     runtime::{TunnelFactory, TunnelRuntime},
     socks5::{serve_socks, DialNetwork, DialSocket, SocksDialer},
     util::{one_line, write_file},
-    warp_logic::{warp_gate_ips, warp_gate_names},
+    warp_logic::{
+        warp_budget, warp_exit_is_transit_only, warp_gate_ips, warp_gate_names, warp_openvpn_args,
+        warp_path_mtu, warp_pull_filters, WarpAccount,
+    },
+    warp_runtime::WarpService,
 };
 
 const EXIT_IP_ORACLES: &[&str] = &[
@@ -75,6 +79,8 @@ pub struct LinuxTunnelRuntime {
     instance: Instance,
     netns: Netns,
     settings: Arc<RwLock<WebSettings>>,
+    warp: Option<Arc<WarpService>>,
+    node: RwLock<Option<Node>>,
     cred: Arc<RwLock<SocksCred>>,
     proc: Mutex<Option<OvpnProc>>,
     listener: Mutex<Option<Arc<TcpListener>>>,
@@ -91,6 +97,7 @@ impl LinuxTunnelRuntime {
         dir: &Path,
         instance: Instance,
         settings: Arc<RwLock<WebSettings>>,
+        warp: Option<Arc<WarpService>>,
     ) -> Self {
         let netns = Netns::new(instance.clone(), slot);
         Self {
@@ -100,6 +107,8 @@ impl LinuxTunnelRuntime {
             instance,
             netns,
             settings,
+            warp,
+            node: RwLock::new(None),
             cred: Arc::new(RwLock::new(cred)),
             proc: Mutex::new(None),
             listener: Mutex::new(None),
@@ -183,6 +192,17 @@ impl TunnelRuntime for LinuxTunnelRuntime {
         *self.dead.lock().unwrap_or_else(|p| p.into_inner()) = None;
         let direct = self.resolve_direct_ips(node).await;
         self.netns.setup(&direct)?;
+        *self.node.write().await = Some(node.clone());
+        let settings = self.settings.read().await.clone();
+        let acc: Option<WarpAccount> = if settings.warp.enabled {
+            let svc = self
+                .warp
+                .as_ref()
+                .ok_or_else(|| anyhow!("WARP 中转已开启，但注册服务未加载"))?;
+            Some(svc.setup(&self.netns, node).await?)
+        } else {
+            None
+        };
         let (cfg, auth, log) = openvpn_paths(&self.dir, &self.netns.name());
         write_file(&cfg, node.config.as_bytes(), 0o600)?;
         write_file(&auth, b"vpn\nvpn\n", 0o600)?;
@@ -198,8 +218,9 @@ impl TunnelRuntime for LinuxTunnelRuntime {
             .find(|p| p.chars().next().is_some_and(|c| c.is_ascii_digit()))
             .unwrap_or("")
             .to_string();
-        let settings = self.settings.read().await.clone();
-        let budget = Duration::from_secs(settings.conn.connect_budget);
+        let on = acc.is_some();
+        let budget = warp_budget(Duration::from_secs(settings.conn.connect_budget), on);
+        let (_, tun_mtu, mssfix) = warp_path_mtu(on, 1500);
         let aead_only = settings.conn.aead_only && node_supports_aead(&node.config);
         let mut args = vec![
             "--config".into(),
@@ -218,7 +239,8 @@ impl TunnelRuntime for LinuxTunnelRuntime {
         if aead_only {
             args.extend(compression_off_args(&version));
         }
-        let mssfix = 1400;
+        args.extend(warp_openvpn_args(on, tun_mtu));
+        args.extend(warp_pull_filters(on, &version));
         args.extend(ovpn_tuning(budget, mssfix));
 
         let proc = spawn_openvpn_in_netns(&self.netns.name(), &bin, &args).await?;
@@ -233,6 +255,9 @@ impl TunnelRuntime for LinuxTunnelRuntime {
             proc.kill();
             self.netns.teardown();
             return Err(anyhow!(one_line(&why, 500)));
+        }
+        if let (Some(svc), Some(a)) = (&self.warp, &acc) {
+            svc.split(&self.netns, node, a).await?;
         }
         *self.proc.lock().await = Some(proc.clone());
         let watch = proc.clone();
@@ -289,6 +314,11 @@ impl TunnelRuntime for LinuxTunnelRuntime {
                 Ok(out) => {
                     let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     if let Ok(v4) = ip.parse::<Ipv4Addr>() {
+                        if self.settings.read().await.warp.enabled && warp_exit_is_transit_only(&ip)
+                        {
+                            reason = format!("出口只走到了 Cloudflare 中转（{ip}），没走节点");
+                            continue;
+                        }
                         return Ok(v4.to_string());
                     }
                     reason = format!("返回不是 IPv4: {}", one_line(&ip, 120));
@@ -303,14 +333,54 @@ impl TunnelRuntime for LinuxTunnelRuntime {
         self.dead.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
+    fn socks_dialer(&self) -> Arc<dyn SocksDialer> {
+        Arc::new(NetnsSocksDialer {
+            dialer: NetnsDialer::new(self.netns.name()),
+        })
+    }
+
     async fn healthy(&self) -> bool {
-        tun0_up(&self.netns.name()) && netns_has_default(&self.netns.name())
+        if !tun0_up(&self.netns.name()) {
+            return false;
+        }
+        if self.settings.read().await.warp.enabled {
+            return self.transit_status().await.1;
+        }
+        netns_has_default(&self.netns.name())
+    }
+
+    async fn guard_transit(&self) -> Result<()> {
+        if !self.settings.read().await.warp.enabled {
+            return Ok(());
+        }
+        let node = self.node.read().await.clone();
+        let Some(svc) = &self.warp else {
+            return Ok(());
+        };
+        let Some(acc) = svc.get(self.slot).await else {
+            return Ok(());
+        };
+        if let Some(node) = node {
+            svc.guard(&self.netns, &node, &acc).await?;
+        }
+        Ok(())
+    }
+
+    async fn transit_status(&self) -> (String, bool) {
+        if !self.settings.read().await.warp.enabled {
+            return (String::new(), false);
+        }
+        let Some(svc) = &self.warp else {
+            return (String::new(), false);
+        };
+        svc.status(&self.netns, self.slot).await
     }
 }
 
 pub struct LinuxTunnelFactory {
     pub instance: Instance,
     pub settings: Arc<RwLock<WebSettings>>,
+    pub warp: Option<Arc<WarpService>>,
 }
 
 impl TunnelFactory for LinuxTunnelFactory {
@@ -328,6 +398,7 @@ impl TunnelFactory for LinuxTunnelFactory {
             dir,
             self.instance.clone(),
             self.settings.clone(),
+            self.warp.clone(),
         ))
     }
 }

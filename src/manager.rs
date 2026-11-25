@@ -604,6 +604,7 @@ impl Manager {
             let s = t.state().await;
             let country = node_label(&s.node);
             let aead = crate::nodes::node_supports_aead(&s.node.config);
+            let (warp_ip, warp_live) = t.runtime.transit_status().await;
             out.push(Exit {
                 slot: s.slot,
                 port: s.port,
@@ -617,8 +618,8 @@ impl Manager {
                 socks_user: s.cred.user,
                 socks_pass: s.cred.pass,
                 inbounds: Vec::new(),
-                warp_ip: String::new(),
-                warp_live: false,
+                warp_ip,
+                warp_live,
                 aead,
             });
         }
@@ -689,6 +690,9 @@ impl Manager {
                 let sem = sem.clone();
                 tasks.push(tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.ok();
+                    if let Err(e) = t.runtime.guard_transit().await {
+                        tracing::warn!("隧道 {} 中转路由对齐失败: {e}", t.slot);
+                    }
                     if let Some(why) = t.runtime.dead_reason() {
                         return (t, false, why, true);
                     }

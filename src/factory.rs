@@ -6,6 +6,7 @@ use tokio::sync::RwLock;
 use crate::{
     models::{Node, SocksCred},
     runtime::{TunnelFactory, TunnelRuntime},
+    socks5::{DialNetwork, DialSocket, SocksDialer},
 };
 
 pub struct UnavailableRuntime {
@@ -32,6 +33,18 @@ impl TunnelRuntime for UnavailableRuntime {
     }
     async fn healthy(&self) -> bool {
         false
+    }
+    fn socks_dialer(&self) -> Arc<dyn SocksDialer> {
+        Arc::new(UnavailableDialer)
+    }
+}
+
+pub struct UnavailableDialer;
+
+#[async_trait]
+impl SocksDialer for UnavailableDialer {
+    async fn dial(&self, _network: DialNetwork, _addr: &str) -> Result<DialSocket> {
+        bail!("Linux netns/OpenVPN 运行时尚未接入")
     }
 }
 

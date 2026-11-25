@@ -25,6 +25,7 @@ mod sub;
 mod tunnel_runtime;
 mod util;
 mod warp_logic;
+mod warp_runtime;
 mod web;
 
 use anyhow::Result;
@@ -99,6 +100,10 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() } != 0 {
+        anyhow::bail!("需要 root 运行");
+    }
     let dir = args.dir.unwrap_or_else(|| PathBuf::from("/var/lib/fanout"));
     std::fs::create_dir_all(&dir)?;
     let _lock = util::workdir_lock(&dir)?;
@@ -109,6 +114,11 @@ async fn main() -> Result<()> {
         port_explicit,
     )?;
     let instance = instance::Instance::init(&dir)?;
+    let tag = if dir == PathBuf::from("/var/lib/fanout") {
+        String::new()
+    } else {
+        util::short_hash(&dir.to_string_lossy())
+    };
     process::init_main_netns()?;
     if let Some(ip) = args.ip.as_ref() {
         publicip::set_public_ip_override(ip);
@@ -120,6 +130,11 @@ async fn main() -> Result<()> {
     }
 
     let settings = Arc::new(RwLock::new(settings));
+    let warp = Arc::new(warp_runtime::WarpService::load(
+        &dir,
+        tag.clone(),
+        settings.clone(),
+    )?);
     let listen_addr = settings.read().await.listen_addr.clone();
     let web_port = settings.read().await.port;
     let jobs = jobs::JobStore::new();
@@ -131,6 +146,7 @@ async fn main() -> Result<()> {
         Arc::new(tunnel_runtime::LinuxTunnelFactory {
             instance,
             settings: settings.clone(),
+            warp: Some(warp.clone()),
         }),
     );
     let state = Arc::new(appstate::AppState {
@@ -138,6 +154,7 @@ async fn main() -> Result<()> {
         manager: manager.clone(),
         dir: dir.clone(),
         basepath: basepath.clone(),
+        warp,
     });
     if let Err(e) = manager.restore().await {
         tracing::warn!("恢复隧道状态失败: {e}");
@@ -147,11 +164,6 @@ async fn main() -> Result<()> {
         health_manager.health_loop().await;
     });
 
-    let tag = if dir == PathBuf::from("/var/lib/fanout") {
-        String::new()
-    } else {
-        util::short_hash(&dir.to_string_lossy())
-    };
     if !tag.is_empty() {
         tracing::info!("非默认工作目录，本实例用 netns fo{tag}*");
     }
@@ -177,7 +189,7 @@ async fn main() -> Result<()> {
         .route("/api/jobs", get(api::jobs))
         .route("/api/jobs/dismiss", get(api::job_dismiss))
         .route("/api/pools", get(api::pools))
-        .route("/api/warp", get(api::warp).post(api::not_implemented))
+        .route("/api/warp", get(api::warp_get).post(api::warp_set))
         .route("/api/stats", get(api::stats))
         .route("/api/client/status", get(api::client_status))
         .route("/api/xui", get(api::xui_status))

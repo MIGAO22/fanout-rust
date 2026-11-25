@@ -233,7 +233,8 @@ fn parse_node_csv_rejects_bad_lists() {
     assert!(parse_node_csv(&format!("*vpn_servers\n{CSV_HEADER}\n*\n"), "balanced").is_err());
 
     let missing = CSV_HEADER.replace("CountryShort,", "");
-    let row = sample_node_csv("vpn1").lines().nth(2).unwrap();
+    let csv = sample_node_csv("vpn1");
+    let row = csv.lines().nth(2).unwrap().to_string();
     let err =
         parse_node_csv(&format!("*vpn_servers\n{missing}\n{row}\n*\n"), "balanced").unwrap_err();
     assert!(err.to_string().contains("CountryShort"));

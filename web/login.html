@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f5f6f8">
+<title>进入 fanout</title>
+<style>
+:root{
+  --bg:#f5f6f8; --surface:#fff; --border:#e5e8ed; --border-2:#d5dae2;
+  --text:#14181f; --text-2:#59616e; --text-3:#8a93a2;
+  --accent:#3d4ec7; --accent-hover:#3444b3; --accent-ring:rgba(90,107,240,.16);
+  --accent-fg:#fff; --bad:#c0392b; --mono:ui-monospace,"SF Mono","Cascadia Mono",Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0b0e14; --surface:#131822; --border:#1e242f; --border-2:#2a323f;
+    --text:#e6ebf3; --text-2:#a3adbd; --text-3:#6e7889;
+    --accent:#6878ff; --accent-hover:#7d8bff; --accent-ring:rgba(104,120,255,.22);
+    --accent-fg:#0b0e14; --bad:#f0776c;
+  }
+}
+*{box-sizing:border-box}
+body{
+  margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:26px;padding:24px;color:var(--text);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",
+    "PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  background:
+    radial-gradient(900px 500px at 50% -10%,rgba(90,107,240,.10),transparent 70%),
+    linear-gradient(var(--border) .5px,transparent .5px) 0 0/100% 32px,
+    linear-gradient(90deg,var(--border) .5px,transparent .5px) 0 0/32px 100%,
+    var(--bg);
+  background-attachment:fixed;
+  -webkit-font-smoothing:antialiased;
+}
+.card{
+  width:min(360px,100%);background:var(--surface);border:1px solid var(--border);
+  border-radius:16px;padding:28px;
+  box-shadow:0 1px 2px rgba(16,24,40,.04),0 18px 40px -22px rgba(16,24,40,.24);
+  animation:rise .4s cubic-bezier(.2,.7,.3,1) both;
+}
+@keyframes rise{from{opacity:0;transform:translateY(10px)}}
+.brand{display:flex;align-items:center;gap:11px;margin-bottom:22px}
+.mark{width:34px;height:34px;border-radius:10px;flex:none;display:grid;place-items:center;
+  background:linear-gradient(150deg,#5a6bf0,#2f3ca8);color:#fff;
+  box-shadow:0 4px 12px -4px rgba(90,107,240,.6)}
+.mark svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.9;
+  stroke-linecap:round;stroke-linejoin:round}
+.brand h1{margin:0;font-size:16px;font-weight:650;letter-spacing:-.01em}
+.brand p{margin:1px 0 0;font-size:11.5px;color:var(--text-3)}
+label{display:block;font-size:12px;font-weight:600;color:var(--text-2);margin-bottom:7px}
+input{
+  width:100%;height:40px;padding:0 12px;border-radius:10px;border:1px solid var(--border-2);
+  background:var(--bg);color:var(--text);font:14px var(--mono);
+  transition:border-color .15s,box-shadow .15s,background .15s;
+}
+input:hover{border-color:var(--text-3)}
+input:focus{outline:none;border-color:var(--accent);background:var(--surface);
+  box-shadow:0 0 0 3px var(--accent-ring)}
+input::placeholder{color:var(--text-3);font-family:inherit}
+button{
+  width:100%;height:40px;margin-top:14px;border:0;border-radius:10px;cursor:pointer;
+  background:var(--accent);color:var(--accent-fg);font:inherit;font-size:13.5px;font-weight:620;
+  transition:background .15s,transform .08s,box-shadow .15s;
+  box-shadow:0 1px 2px rgba(16,24,40,.1),inset 0 1px 0 rgba(255,255,255,.14);
+}
+button:hover:not(:disabled){background:var(--accent-hover)}
+button:active:not(:disabled){transform:translateY(1px)}
+button:disabled{opacity:.55;cursor:default}
+.err{min-height:18px;margin-top:11px;font-size:12px;color:var(--bad)}
+.err:empty{display:none}
+.tip{font-size:11.5px;color:var(--text-3);line-height:1.6;text-align:center;max-width:340px}
+.tip code{font-family:var(--mono);font-size:11px;background:var(--surface);
+  border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:var(--text-2)}
+.links{display:flex;gap:16px;flex-wrap:wrap;justify-content:center}
+.links a{color:var(--text-3);font-size:11.5px;text-decoration:none;transition:color .15s}
+.links a:hover{color:var(--accent)}
+</style>
+</head>
+<body>
+<form class="card" id="f" autocomplete="on">
+  <div class="brand">
+    <div class="mark">
+      <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2.3"/>
+        <circle cx="19" cy="5" r="2.3"/><circle cx="19" cy="12" r="2.3"/>
+        <circle cx="19" cy="19" r="2.3"/>
+        <path d="M7.3 11.2 16.7 6M7.3 12h9.4M7.3 12.8l9.4 5.4"/></svg>
+    </div>
+    <div>
+      <h1>fanout</h1>
+      <p>多出口代理控制台</p>
+    </div>
+  </div>
+  <label for="pw">访问口令</label>
+  <input type="password" id="pw" name="password" autofocus autocomplete="current-password"
+         spellcheck="false" placeholder="••••••••">
+  <button type="submit" id="go">进入</button>
+  <div class="err" id="err" role="alert"></div>
+</form>
+<div class="tip">口令在首次启动时随机生成，存于工作目录的 <code>password</code> 文件里。</div>
+<div class="links">
+  <a href="https://github.com/MIGAO22/fanout" target="_blank" rel="noopener">GitHub</a>
+</div>
+<script>
+var f = document.getElementById('f'),
+    pw = document.getElementById('pw'),
+    go = document.getElementById('go'),
+    err = document.getElementById('err');
+// 后端读的是 r.FormValue("password")，必须是表单编码；发 JSON 会静默 401
+// 并烧掉 8 次 / 2 分钟的失败额度。
+f.onsubmit = function(e){
+  e.preventDefault();
+  if(!pw.value){ err.textContent = '口令不能为空'; pw.focus(); return; }
+  go.disabled = true;
+  err.textContent = '';
+  fetch('login', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: new URLSearchParams({password: pw.value}).toString()
+  }).then(function(r){
+    if(r.ok){ location.reload(); return; }
+    return r.json().catch(function(){ return {}; }).then(function(d){
+      err.textContent = d.error || '登录失败';
+      go.disabled = false;
+      pw.select();
+    });
+  }, function(){
+    err.textContent = '连不上服务，检查一下网络';
+    go.disabled = false;
+  });
+};
+</script>
+</body>
+</html>

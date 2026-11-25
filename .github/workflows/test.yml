@@ -1,0 +1,32 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 格式检查
+        run: cargo fmt --all -- --check
+      - name: 类型检查
+        run: cargo check --all-targets
+      - name: 单元测试
+        run: cargo test --all -- --test-threads=1
+      - name: 构建 amd64
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+      - name: 交叉编译 arm64
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          cargo build --release --target aarch64-unknown-linux-gnu

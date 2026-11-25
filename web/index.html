@@ -1,0 +1,1527 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>fanout · 出口控制台</title>
+<style>
+/* ============================================================
+   设计令牌
+   ============================================================ */
+:root{
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI Variable Text","Segoe UI",
+         "PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --mono:"SF Mono",ui-monospace,"JetBrains Mono","Cascadia Mono",Consolas,
+         "Liberation Mono",monospace;
+
+  --r-xs:6px; --r-sm:8px; --r:10px; --r-lg:14px; --r-xl:20px; --r-full:999px;
+
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px;
+  --sp-6:24px; --sp-8:32px; --sp-10:40px;
+
+  --ease:cubic-bezier(.4,0,.2,1);
+  --ease-out:cubic-bezier(.16,1,.3,1);
+  --t-fast:.13s var(--ease);
+  --t:.2s var(--ease);
+
+  --sb-w:236px;
+}
+
+/* —— 浅色（默认） —— */
+html[data-theme="light"]{
+  --bg:#f6f7f9;
+  --bg-grid:rgba(16,24,40,.022);
+  --surface:#ffffff;
+  --surface-2:#f3f5f8;
+  --surface-3:#eaeef4;
+  --header:rgba(255,255,255,.82);
+
+  --border:#e5e8ee;
+  --border-2:#d6dbe5;
+  --border-3:#c3cad8;
+
+  --text:#0f1726;
+  --text-2:#5a6478;
+  --text-3:#8b95a8;
+
+  --accent:#4a5cf0;
+  --accent-hover:#3a4ae0;
+  --accent-press:#303ec9;
+  --accent-fg:#ffffff;
+  --accent-soft:rgba(74,92,240,.09);
+  --accent-ring:rgba(74,92,240,.28);
+  --accent-2:#0ea5d9;
+
+  --ok:#0f9d58;      --ok-soft:rgba(15,157,88,.10);   --ok-line:rgba(15,157,88,.26);
+  --warn:#c47f0a;    --warn-soft:rgba(196,127,10,.11);--warn-line:rgba(196,127,10,.28);
+  --bad:#dc3547;     --bad-soft:rgba(220,53,71,.09);  --bad-line:rgba(220,53,71,.26);
+  --idle:#8b95a8;    --idle-soft:rgba(139,149,168,.12);
+
+  --sh-1:0 1px 2px rgba(16,24,40,.05);
+  --sh-2:0 1px 2px rgba(16,24,40,.05),0 4px 14px -6px rgba(16,24,40,.10);
+  --sh-3:0 2px 4px rgba(16,24,40,.05),0 12px 32px -10px rgba(16,24,40,.16);
+  --sh-pop:0 8px 20px -6px rgba(16,24,40,.14),0 24px 60px -20px rgba(16,24,40,.24);
+}
+
+/* —— 深色（可切换，同一套令牌换值） —— */
+html[data-theme="dark"]{
+  --bg:#0b0e14;
+  --bg-grid:rgba(255,255,255,.028);
+  --surface:#131822;
+  --surface-2:#1a212d;
+  --surface-3:#232c3b;
+  --header:rgba(19,24,34,.82);
+
+  --border:#232b38;
+  --border-2:#2e3846;
+  --border-3:#3d4959;
+
+  --text:#e6ebf4;
+  --text-2:#9aa6ba;
+  --text-3:#6b7789;
+
+  --accent:#6878ff;
+  --accent-hover:#7c8bff;
+  --accent-press:#5563e8;
+  --accent-fg:#0b0e14;
+  --accent-soft:rgba(104,120,255,.14);
+  --accent-ring:rgba(104,120,255,.4);
+  --accent-2:#22c3e8;
+
+  --ok:#2ecc8f;      --ok-soft:rgba(46,204,143,.13);   --ok-line:rgba(46,204,143,.3);
+  --warn:#e8b34a;    --warn-soft:rgba(232,179,74,.13); --warn-line:rgba(232,179,74,.3);
+  --bad:#f2718a;     --bad-soft:rgba(242,113,138,.12); --bad-line:rgba(242,113,138,.3);
+  --idle:#6b7789;    --idle-soft:rgba(107,119,137,.14);
+
+  --sh-1:0 1px 2px rgba(0,0,0,.4);
+  --sh-2:0 1px 2px rgba(0,0,0,.4),0 4px 14px -6px rgba(0,0,0,.6);
+  --sh-3:0 2px 4px rgba(0,0,0,.4),0 12px 32px -10px rgba(0,0,0,.7);
+  --sh-pop:0 8px 20px -6px rgba(0,0,0,.6),0 24px 60px -20px rgba(0,0,0,.8);
+}
+
+*,*::before,*::after{box-sizing:border-box}
+/* [hidden] 的浏览器默认规则只覆盖 HTML 命名空间，SVG 元素上形同无效；
+   界面靠 hidden 切视图、也靠它藏 KPI 圆环，这里补一条全局的 */
+[hidden]{display:none !important}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.55 var(--font);
+  -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
+  font-variant-numeric:tabular-nums;
+  background-image:
+    radial-gradient(900px 480px at 100% -8%,var(--accent-soft),transparent 62%),
+    linear-gradient(var(--bg-grid) 1px,transparent 1px),
+    linear-gradient(90deg,var(--bg-grid) 1px,transparent 1px);
+  background-size:auto,22px 22px,22px 22px;
+  background-attachment:fixed;
+}
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
+}
+::selection{background:var(--accent-ring);color:var(--text)}
+button,input,select,textarea{font:inherit;color:inherit}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--r-xs)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+/* ============================================================
+   骨架
+   ============================================================ */
+.app{display:flex;min-height:100vh;align-items:stretch}
+
+/* —— 侧栏 —— */
+.sidebar{
+  width:var(--sb-w);flex:none;position:sticky;top:0;height:100vh;
+  display:flex;flex-direction:column;gap:var(--sp-2);
+  padding:var(--sp-4) var(--sp-3);
+  background:var(--surface);border-right:1px solid var(--border);
+  z-index:30;
+}
+.brand{display:flex;align-items:center;gap:10px;padding:var(--sp-2) var(--sp-2) var(--sp-3)}
+.brand .mark{
+  width:32px;height:32px;border-radius:9px;flex:none;display:grid;place-items:center;
+  background:linear-gradient(140deg,var(--accent-2),var(--accent) 52%,#9a5cf0);
+  box-shadow:0 4px 12px -4px var(--accent-ring),inset 0 1px 0 rgba(255,255,255,.35);
+}
+.brand .mark svg{width:19px;height:19px;stroke:#fff;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.brand .name{font-size:15px;font-weight:650;letter-spacing:-.2px}
+.brand .tag{display:block;font-size:10.5px;font-weight:500;color:var(--text-3);letter-spacing:.02em;margin-top:-2px}
+
+.nav{display:flex;flex-direction:column;gap:2px}
+.nav-lbl{font-size:10.5px;font-weight:600;color:var(--text-3);letter-spacing:.07em;
+  text-transform:uppercase;padding:var(--sp-3) var(--sp-3) var(--sp-1)}
+.nav-item{
+  display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+  padding:8px 10px;border:0;border-radius:var(--r);background:transparent;
+  color:var(--text-2);cursor:pointer;font-size:13.5px;font-weight:500;
+  transition:background var(--t-fast),color var(--t-fast);
+}
+.nav-item svg{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round}
+.nav-item:hover{background:var(--surface-2);color:var(--text)}
+.nav-item.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.nav-item .n{margin-left:auto;font-size:11px;font-weight:600;color:var(--text-3);
+  background:var(--surface-2);border-radius:var(--r-full);padding:1px 7px;min-width:20px;text-align:center}
+.nav-item.on .n{background:var(--surface);color:var(--accent)}
+
+.sb-foot{margin-top:auto;display:flex;flex-direction:column;gap:var(--sp-2)}
+.sb-card{border:1px solid var(--border);border-radius:var(--r-lg);padding:10px 12px;
+  background:var(--surface-2)}
+.sb-card .k{font-size:10.5px;font-weight:600;color:var(--text-3);letter-spacing:.05em;text-transform:uppercase}
+.sb-card .v{font-size:12.5px;font-weight:600;margin-top:3px;display:flex;align-items:center;gap:6px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb-card .v .mini-dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none;
+  box-shadow:0 0 0 3px var(--ok-soft)}
+.sb-card .v .mini-dot.bad{background:var(--bad);box-shadow:0 0 0 3px var(--bad-soft)}
+.sb-card .sub{font-size:11px;color:var(--text-3);margin-top:2px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+/* 竖排：底部这两个是"非导航"的动作，横着挤会把「退出登录」压成两行 */
+.sb-tools{display:flex;flex-direction:column;gap:6px}
+.sb-tools .nav-item{flex:1;justify-content:center;padding:7px 8px;font-size:12.5px}
+
+/* —— 主区 —— */
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{
+  position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:var(--sp-3);
+  flex-wrap:wrap;min-height:58px;padding:11px var(--sp-6) 0;
+  background:var(--header);backdrop-filter:saturate(1.6) blur(12px);
+  -webkit-backdrop-filter:saturate(1.6) blur(12px);
+  border-bottom:1px solid var(--border);
+}
+.topbar h1{font-size:15px;font-weight:650;margin:0;letter-spacing:-.15px;white-space:nowrap}
+.topbar .sub{font-size:12px;color:var(--text-3);white-space:nowrap}
+@media(max-width:640px){.topbar .sub{display:none}}
+
+/* —— 顶栏的主机负载胶囊 ——
+   胶囊里那条绿就是"占了多大比例"，右边数字是原始量：
+   只显示比例看不出 64G 机器上的 40% 和 1G 机器上的 40% 差多少。 */
+.stats{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap;row-gap:6px;
+  order:9;width:100%;margin:0 calc(-1 * var(--sp-6));padding:7px var(--sp-6) 9px}
+.stat{display:inline-flex;align-items:center;gap:7px;height:26px;padding:0 10px;flex:none;
+  border:1px solid var(--border);border-radius:var(--r-full);background:var(--surface);
+  box-shadow:var(--sh-1);white-space:nowrap}
+.stat .k{font-size:10.5px;font-weight:650;letter-spacing:.04em;color:var(--text-3)}
+.stat .bar{position:relative;width:42px;height:7px;border-radius:var(--r-full);
+  background:var(--surface-3);overflow:hidden}
+.stat .bar i{position:absolute;left:0;top:0;bottom:0;width:0;border-radius:var(--r-full);
+  background:var(--ok);transition:width var(--t),background var(--t)}
+.stat .v{font:600 11.5px/1 var(--mono);color:var(--text-2)}
+/* 阈值上色：绿是常态，黄了该看一眼，红了就是这台机器在打满 */
+.stat.hot .bar i{background:var(--warn)}
+.stat.over .bar i{background:var(--bad)}
+.stat.off{opacity:.5}
+
+/* 以前窄一点的屏幕整排 display:none、再窄一点藏掉标着 opt 的几颗：挤出去等于没显示，
+   而 UDP 和带宽恰恰是这次要盯的数。现在一律排到顶栏下面那一行，装不下就横滑。 */
+.content{padding:var(--sp-6);max-width:1420px;width:100%;margin:0 auto;
+  display:flex;flex-direction:column;gap:var(--sp-5)}
+.menu-btn{display:none}
+
+/* ============================================================
+   控件
+   ============================================================ */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  height:32px;padding:0 12px;border:1px solid var(--border-2);border-radius:var(--r-sm);
+  background:var(--surface);color:var(--text);font-size:13px;font-weight:500;
+  cursor:pointer;white-space:nowrap;box-shadow:var(--sh-1);
+  transition:background var(--t-fast),border-color var(--t-fast),color var(--t-fast),
+             transform var(--t-fast),box-shadow var(--t-fast);
+}
+.btn svg{width:15px;height:15px;flex:none;stroke:currentColor;fill:none;stroke-width:1.85;
+  stroke-linecap:round;stroke-linejoin:round}
+.btn:hover:not(:disabled){background:var(--surface-2);border-color:var(--border-3)}
+.btn:active:not(:disabled){transform:translateY(.5px)}
+.btn:disabled{opacity:.45;cursor:default;box-shadow:none}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);
+  font-weight:600;box-shadow:0 1px 2px rgba(16,24,40,.1),0 4px 12px -4px var(--accent-ring)}
+.btn.primary:hover:not(:disabled){background:var(--accent-hover);border-color:var(--accent-hover)}
+.btn.primary:active:not(:disabled){background:var(--accent-press)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--text-2);box-shadow:none}
+.btn.ghost:hover:not(:disabled){background:var(--surface-2);color:var(--text)}
+.btn.danger{color:var(--bad);border-color:var(--bad-line);background:var(--bad-soft)}
+.btn.danger:hover:not(:disabled){background:var(--bad);color:#fff;border-color:var(--bad)}
+.btn.sm{height:27px;padding:0 9px;font-size:12px;border-radius:var(--r-xs)}
+.btn.sm svg{width:13px;height:13px}
+.ico{width:29px;height:29px;padding:0;border:1px solid transparent;border-radius:var(--r-sm);
+  background:transparent;color:var(--text-3);box-shadow:none;
+  display:inline-flex;align-items:center;justify-content:center;cursor:pointer;
+  transition:background var(--t-fast),color var(--t-fast),border-color var(--t-fast)}
+.ico svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.85;
+  stroke-linecap:round;stroke-linejoin:round}
+.ico:hover:not(:disabled){background:var(--surface-2);color:var(--text);border-color:var(--border)}
+.ico.danger:hover:not(:disabled){background:var(--bad-soft);color:var(--bad);border-color:var(--bad-line)}
+.ico:disabled{opacity:.35;cursor:default}
+.ico.busy svg{animation:rot .8s linear infinite}
+@keyframes rot{to{transform:rotate(360deg)}}
+
+.field{display:flex;flex-direction:column;gap:6px}
+.field>label{font-size:12px;font-weight:600;color:var(--text-2)}
+.inp,select.inp,textarea.inp{
+  width:100%;height:34px;padding:0 10px;background:var(--surface);
+  border:1px solid var(--border-2);border-radius:var(--r-sm);color:var(--text);
+  font-size:13px;transition:border-color var(--t-fast),box-shadow var(--t-fast),background var(--t-fast);
+}
+textarea.inp{height:auto;padding:9px 10px;line-height:1.7;resize:vertical;font-family:var(--mono);font-size:12px}
+.inp:hover{border-color:var(--border-3)}
+.inp:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-ring)}
+.inp::placeholder{color:var(--text-3)}
+select.inp{appearance:none;padding-right:30px;cursor:pointer;
+  background-image:url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238b95a8' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 9px center;background-size:13px}
+html[data-theme="dark"] select.inp{background-image:url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%236b7789' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")}
+.inp.mono{font-family:var(--mono);font-size:12.5px}
+.hint{font-size:11.5px;color:var(--text-3);line-height:1.5}
+.hint.bad{color:var(--bad)}
+.hint.ok{color:var(--ok)}
+
+.search{position:relative;flex:1;min-width:150px;max-width:340px}
+.search svg{position:absolute;left:10px;top:50%;transform:translateY(-50%);
+  width:14px;height:14px;stroke:var(--text-3);fill:none;stroke-width:2;pointer-events:none}
+.search .inp{padding-left:31px}
+
+.sw{position:relative;display:inline-flex;align-items:center;gap:9px;cursor:pointer;
+  font-size:13px;font-weight:500;user-select:none}
+.sw input{position:absolute;opacity:0;width:0;height:0}
+.sw .track{width:34px;height:20px;border-radius:var(--r-full);background:var(--border-2);
+  flex:none;transition:background var(--t);position:relative}
+.sw .track::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;
+  border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(16,24,40,.28);transition:transform var(--t)}
+.sw input:checked+.track{background:var(--accent)}
+.sw input:checked+.track::after{transform:translateX(14px)}
+.sw input:focus-visible+.track{box-shadow:0 0 0 3px var(--accent-ring)}
+
+.seg{display:inline-flex;padding:2px;gap:2px;background:var(--surface-2);
+  border:1px solid var(--border);border-radius:var(--r-sm)}
+.seg button{height:26px;padding:0 11px;border:0;border-radius:var(--r-xs);background:transparent;
+  color:var(--text-2);font-size:12.5px;font-weight:550;cursor:pointer;
+  display:inline-flex;align-items:center;gap:5px;transition:background var(--t-fast),color var(--t-fast),box-shadow var(--t-fast)}
+.seg button:hover{color:var(--text)}
+.seg button svg{width:14px;height:14px;flex:none;stroke:currentColor;fill:none;stroke-width:1.85;
+  stroke-linecap:round;stroke-linejoin:round}
+.seg button.on{background:var(--surface);color:var(--text);font-weight:600;box-shadow:var(--sh-1)}
+.seg button .c{font-size:11px;color:var(--text-3);font-weight:600}
+.seg button.on .c{color:var(--accent)}
+
+/* ============================================================
+   KPI
+   ============================================================ */
+.kpis{display:grid;gap:var(--sp-3);grid-template-columns:repeat(auto-fit,minmax(168px,1fr))}
+.kpi{position:relative;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r-lg);padding:14px 16px;overflow:hidden;box-shadow:var(--sh-1);
+  transition:box-shadow var(--t),border-color var(--t),transform var(--t)}
+.kpi:hover{box-shadow:var(--sh-2);border-color:var(--border-2)}
+.kpi .k{font-size:11px;font-weight:600;color:var(--text-3);letter-spacing:.04em;
+  text-transform:uppercase;display:flex;align-items:center;gap:6px}
+.kpi .k svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;
+  stroke-linecap:round;stroke-linejoin:round}
+.kpi .v{font-size:25px;font-weight:660;letter-spacing:-.9px;line-height:1.15;margin-top:7px;
+  font-family:var(--mono);display:flex;align-items:baseline;gap:5px}
+.kpi .v .u{font-size:12.5px;font-weight:500;color:var(--text-3);font-family:var(--font);letter-spacing:0}
+.kpi .s{font-size:11.5px;color:var(--text-3);margin-top:3px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.kpi .s b{color:var(--ok);font-weight:600}
+.kpi .s b.warn{color:var(--warn)}
+.kpi .s b.bad{color:var(--bad)}
+.kpi .s b.idle{color:var(--idle)}
+.kpi .ring{position:absolute;right:-16px;top:-16px;width:76px;height:76px;opacity:.5}
+.kpi .ring circle{fill:none;stroke-width:6}
+.kpi .ring .bgc{stroke:var(--surface-2)}
+.kpi .ring .fgc{stroke:var(--ok);stroke-linecap:round;
+  transform:rotate(-90deg);transform-origin:center;transition:stroke-dashoffset .7s var(--ease-out)}
+
+/* ============================================================
+   任务进度
+   ============================================================ */
+.jobs{display:flex;flex-direction:column;gap:var(--sp-3)}
+.job{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);
+  padding:14px 16px;box-shadow:var(--sh-1);animation:slideIn .3s var(--ease-out)}
+@keyframes slideIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+.job .top{display:flex;align-items:center;gap:var(--sp-3)}
+.job .top strong{font-size:13.5px;font-weight:620}
+.job .frac{font-size:11.5px;font-weight:600;color:var(--text-2);font-family:var(--mono);
+  background:var(--surface-2);border-radius:var(--r-full);padding:1px 8px}
+.job .prog{height:5px;border-radius:var(--r-full);background:var(--surface-2);
+  margin:11px 0 10px;overflow:hidden}
+.job .prog i{display:block;height:100%;border-radius:var(--r-full);
+  background:linear-gradient(90deg,var(--accent-2),var(--accent));
+  transition:width .5s var(--ease-out)}
+.job.done .prog i{background:var(--ok)}
+.job.failed .prog i{background:linear-gradient(90deg,var(--warn),var(--bad))}
+.steps{display:flex;flex-wrap:wrap;gap:6px}
+.step{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:500;
+  color:var(--text-2);background:var(--surface-2);border:1px solid var(--border);
+  border-radius:var(--r-xs);padding:3px 8px;max-width:100%}
+.step span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.step svg{width:12px;height:12px;flex:none;stroke:currentColor;fill:none;stroke-width:2.2;
+  stroke-linecap:round;stroke-linejoin:round}
+.step.ok{color:var(--ok);border-color:var(--ok-line);background:var(--ok-soft)}
+.step.failed{color:var(--bad);border-color:var(--bad-line);background:var(--bad-soft)}
+.step.running{color:var(--accent);border-color:var(--accent-ring);background:var(--accent-soft)}
+.step.running svg{animation:rot .9s linear infinite}
+
+/* ============================================================
+   工具条
+   ============================================================ */
+.sec-head{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
+.sec-head h2{font-size:14px;font-weight:650;margin:0;letter-spacing:-.1px;
+  display:flex;align-items:center;gap:8px}
+.sec-head h2 .n{font-size:11.5px;font-weight:600;color:var(--text-3);
+  background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-full);padding:1px 8px}
+.toolbar{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap}
+.toolbar .gap{flex:1}
+.acts{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+
+/* ============================================================
+   出口卡片
+   ============================================================ */
+.grid{display:grid;gap:var(--sp-3);grid-template-columns:repeat(auto-fill,minmax(336px,1fr))}
+.grid.list{grid-template-columns:1fr}
+.card{position:relative;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r-lg);padding:14px 15px 13px 18px;box-shadow:var(--sh-1);
+  overflow:hidden;transition:box-shadow var(--t),border-color var(--t),transform var(--t)}
+.card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:var(--idle);transition:background var(--t)}
+.card.up::before{background:linear-gradient(180deg,var(--accent-2),var(--ok))}
+.card.starting::before{background:var(--warn)}
+.card.failed::before{background:var(--bad)}
+.card:hover{box-shadow:var(--sh-2);border-color:var(--border-2);transform:translateY(-1px)}
+.card.off{opacity:.72}
+.card.off:hover{opacity:.9}
+
+.card .hd{display:flex;align-items:flex-start;gap:10px}
+.card .ttl{flex:1;min-width:0}
+.card .place{font-size:13.5px;font-weight:620;letter-spacing:-.1px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card .node{font-size:11.5px;color:var(--text-3);font-family:var(--mono);margin-top:1px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.orb{position:relative;width:11px;height:11px;border-radius:50%;flex:none;margin-top:4px;
+  background:var(--idle)}
+.orb::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:1.5px solid transparent}
+.orb.up{background:var(--ok);box-shadow:0 0 0 3px var(--ok-soft)}
+.orb.up::after{border-color:var(--ok-line);animation:halo 2.6s var(--ease) infinite}
+.orb.starting{background:var(--warn);box-shadow:0 0 0 3px var(--warn-soft)}
+.orb.starting::after{border-color:transparent;border-top-color:var(--warn);
+  border-right-color:var(--warn);animation:rot .8s linear infinite}
+.orb.failed{background:var(--bad);box-shadow:0 0 0 3px var(--bad-soft)}
+@keyframes halo{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.35);opacity:.35}}
+
+.ip{font-family:var(--mono);font-size:19px;font-weight:600;letter-spacing:-.5px;
+  margin-top:9px;display:flex;align-items:center;gap:7px}
+.ip .lbl{font-family:var(--font);font-size:10.5px;font-weight:600;color:var(--text-3);
+  letter-spacing:.05em;text-transform:uppercase}
+.ip .wait{font-family:var(--font);font-size:14px;font-weight:500;color:var(--text-3)}
+
+.meta{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;
+  margin-top:8px;font-size:11.5px;color:var(--text-3)}
+.meta .it{display:inline-flex;align-items:center;gap:4px}
+.meta svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:1.9;
+  stroke-linecap:round;stroke-linejoin:round}
+
+.sock{margin-top:11px;display:flex;align-items:center;gap:6px;padding:7px 9px;
+  border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface-2)}
+.sock .ep{flex:1;min-width:0;font-family:var(--mono);font-size:12.5px;font-weight:550;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:6px}
+.sock .ep svg{width:12px;height:12px;flex:none;stroke:var(--text-3);fill:none;stroke-width:2;
+  stroke-linecap:round;stroke-linejoin:round}
+.sock .ep .auth{font-family:var(--font);font-size:10.5px;font-weight:600;color:var(--warn);
+  background:var(--warn-soft);border-radius:var(--r-xs);padding:0 5px}
+.sock .ep .anon{color:var(--text-3)}
+.sock .ico{width:25px;height:25px}
+.sock .ico svg{width:13px;height:13px}
+
+/* WARP 中转。开关摆在出口总览页——它改变的是每条出口的链路，
+   属于"看出口时顺手要能拨"的东西，不该藏进设置里。 */
+.wbar{display:flex;align-items:center;gap:11px;flex-wrap:wrap;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);
+  padding:11px 14px;margin-bottom:var(--sp-4);box-shadow:var(--sh-1)}
+.wbar .wi{width:29px;height:29px;flex:none;border-radius:var(--r-sm);display:grid;place-items:center;
+  background:var(--surface-2);color:var(--text-3);border:1px solid var(--border);
+  transition:background var(--t-fast),color var(--t-fast),border-color var(--t-fast)}
+.wbar.on .wi{background:var(--accent-soft);color:var(--accent);border-color:var(--accent-ring)}
+.wbar .wi svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.9;
+  stroke-linecap:round;stroke-linejoin:round}
+.wbar .tx{min-width:0;flex:1}
+.wbar .tt{font-size:13px;font-weight:640;display:flex;align-items:center;gap:7px}
+/* 上次没开成那句会带 /proc/self/fd/0、162.159.193.2:2408 这种长 token，不给断行就顶穿卡片 */
+.wbar .ss{font-size:11.5px;color:var(--text-3);margin-top:3px;line-height:1.5;word-break:break-word}
+.wbar .ss b{font-weight:600;color:var(--text-2)}
+.wbar .ss b.ok{color:var(--ok)}
+.wbar .ss b.warn{color:var(--warn)}
+/* 自动装依赖时把真正要跑的命令摊开：一句"会自动装"不如让人看见是哪几条 */
+.wbar .ss code{font-family:var(--mono);font-size:11px;color:var(--text-2);
+  background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-xs);
+  padding:1px 5px;word-break:break-all}
+.wbar .mm{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.wbar .ver{font-family:var(--mono);font-size:11px;color:var(--text-3);
+  background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-xs);padding:2px 7px}
+
+/* 卡片里那一跳：它是中间 hop，不是出口，字号要比出口 IP 小一档 */
+.wipline{margin-top:7px;display:flex;align-items:center;gap:7px;flex-wrap:wrap;
+  font-family:var(--mono);font-size:12.5px;font-weight:560}
+.wipline .lbl{font-family:var(--font);font-size:10.5px;font-weight:600;color:var(--text-3);
+  letter-spacing:.05em;text-transform:uppercase}
+.wipline.dead{opacity:.6}
+
+.chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:11px}
+.chip{display:inline-flex;align-items:center;gap:5px;height:23px;padding:0 8px;
+  border:1px solid var(--border-2);border-radius:var(--r-full);background:var(--surface);
+  font-size:11.5px;font-weight:550;color:var(--text-2);cursor:pointer;
+  transition:border-color var(--t-fast),color var(--t-fast),background var(--t-fast)}
+.chip:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.chip .p{font-size:9.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;
+  color:var(--accent-2)}
+.chip .pt{font-family:var(--mono);color:var(--text-3)}
+.chip:hover .pt{color:var(--accent)}
+.chip.none{border-style:dashed;color:var(--text-3);cursor:default;font-weight:500}
+.chip.none:hover{border-color:var(--border-2);color:var(--text-3);background:var(--surface)}
+.chip.off{opacity:.5}
+
+.card .ft{display:flex;align-items:center;gap:6px;margin-top:12px;padding-top:11px;
+  border-top:1px dashed var(--border)}
+.card .ft .gap{flex:1}
+.errbox{margin-top:10px;padding:8px 10px;border-radius:var(--r-sm);
+  background:var(--bad-soft);border:1px solid var(--bad-line);
+  font-size:11.5px;color:var(--bad);line-height:1.5;word-break:break-word}
+.errbox b{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;
+  margin-bottom:2px;opacity:.85}
+/* 重试中不是失败：程序还在自动换节点，用警告色而不是红——
+   满屏红框会让人去点停止，其实再等半分钟就起来了 */
+.errbox.soft{background:var(--warn-soft);border-color:var(--warn-line);color:var(--warn)}
+
+.skel{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--surface);
+  padding:15px;overflow:hidden;position:relative}
+.skel::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(90deg,transparent,var(--surface-2),transparent);
+  animation:shimmer 1.4s infinite}
+@keyframes shimmer{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+.skel .l{height:11px;border-radius:var(--r-xs);background:var(--surface-2);margin-bottom:10px}
+.skel .l.w40{width:40%}.skel .l.w60{width:60%}.skel .l.w25{width:25%;height:22px}
+
+/* ============================================================
+   空态
+   ============================================================ */
+.empty{border:1px dashed var(--border-2);border-radius:var(--r-xl);padding:48px 24px;
+  text-align:center;background:var(--surface)}
+.empty .glyph{width:60px;height:60px;margin:0 auto 16px;border-radius:var(--r-xl);
+  display:grid;place-items:center;background:var(--accent-soft);
+  border:1px solid var(--accent-ring)}
+.empty .glyph svg{width:27px;height:27px;stroke:var(--accent);fill:none;stroke-width:1.6;
+  stroke-linecap:round;stroke-linejoin:round}
+.empty h3{margin:0 0 6px;font-size:15px;font-weight:640}
+.empty p{margin:0 auto 20px;font-size:12.5px;color:var(--text-3);max-width:400px;line-height:1.65}
+.empty .row{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+
+/* ============================================================
+   未绑定 / 表格
+   ============================================================ */
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);
+  box-shadow:var(--sh-1);overflow:hidden}
+.panel .ph{display:flex;align-items:center;gap:var(--sp-3);padding:12px 15px;
+  border-bottom:1px solid var(--border);background:var(--surface-2)}
+.panel .ph h3{font-size:13px;font-weight:640;margin:0;display:flex;align-items:center;gap:8px}
+.panel .ph h3 svg{width:14px;height:14px;flex:none;stroke:currentColor;fill:none;stroke-width:1.9;
+  stroke-linecap:round;stroke-linejoin:round}
+.panel .ph .n{font-size:11px;font-weight:600;color:var(--text-3)}
+.panel .pb{padding:5px 15px 13px}
+.orow{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.orow:last-child{border-bottom:0}
+.orow .nm{flex:1;min-width:130px;font-size:12.5px;font-weight:550;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:7px}
+.orow .nm .pt{font-family:var(--mono);color:var(--text-3);font-weight:500}
+.orow select.inp{width:auto;min-width:180px;height:29px;font-size:12.5px}
+.orow .none{font-size:11.5px;color:var(--text-3)}
+
+/* 出口组成员勾选表：滚动列表，行内是「状态点 + 主机名 + 地区/出口 IP」 */
+.pb .poolblk{padding:11px 0 1px;border-bottom:1px solid var(--border)}
+.pb .poolblk:last-child{border-bottom:0;padding-bottom:2px}
+.pb .poolblk .orow{border-bottom:0;padding:0 0 9px}
+.pb-list{max-height:236px;overflow:auto;border:1px solid var(--border);
+  border-radius:var(--r);padding:2px 11px;margin-top:8px;background:var(--surface-2)}
+.pb-list label{display:flex;align-items:center;gap:9px;padding:8px 0;cursor:pointer;
+  font-size:12.5px;font-weight:550;border-bottom:1px solid var(--border)}
+.pb-list label:last-child{border-bottom:0}
+.pb-list label input{margin:0;flex:none}
+.pb-list label .h{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pb-list label .n{font-family:var(--mono);font-size:11px;font-weight:500;color:var(--text-3)}
+.pb-list label.dead{opacity:.62}
+.pb-list .none{padding:12px 0;font-size:12px;color:var(--text-3)}
+
+.tbl{width:100%;border-collapse:collapse;font-size:12.5px}
+.tbl th{text-align:left;font-size:10.5px;font-weight:650;color:var(--text-3);
+  letter-spacing:.05em;text-transform:uppercase;padding:9px 12px;
+  border-bottom:1px solid var(--border);white-space:nowrap;background:var(--surface-2);
+  position:sticky;top:0;z-index:1}
+.tbl td{padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:middle}
+.tbl tr:last-child td{border-bottom:0}
+.tbl tbody tr{transition:background var(--t-fast)}
+.tbl tbody tr:hover{background:var(--surface-2)}
+.tbl .m{font-family:var(--mono)}
+.tbl .r{text-align:right;white-space:nowrap}
+.badge{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 7px;
+  border-radius:var(--r-xs);font-size:10.5px;font-weight:650;letter-spacing:.02em;
+  border:1px solid transparent;white-space:nowrap}
+.badge svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+.badge.ok{color:var(--ok);background:var(--ok-soft);border-color:var(--ok-line)}
+.badge.warn{color:var(--warn);background:var(--warn-soft);border-color:var(--warn-line)}
+.badge.bad{color:var(--bad);background:var(--bad-soft);border-color:var(--bad-line)}
+.badge.idle{color:var(--text-3);background:var(--surface-2);border-color:var(--border-2)}
+.badge.acc{color:var(--accent);background:var(--accent-soft);border-color:var(--accent-ring)}
+.badge .d{width:5px;height:5px;border-radius:50%;background:currentColor}
+
+/* ============================================================
+   弹窗 / 抽屉
+   ============================================================ */
+.scr{position:fixed;inset:0;z-index:60;display:none;
+  background:rgba(15,23,38,.42);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);
+  animation:fade .18s var(--ease)}
+html[data-theme="dark"] .scr{background:rgba(0,0,0,.62)}
+.scr.open{display:block}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+
+.dlg{position:fixed;z-index:61;inset:0;display:none;place-items:center;padding:24px;pointer-events:none}
+.dlg.open{display:grid}
+.dlg .box{pointer-events:auto;width:min(660px,100%);max-height:min(88vh,860px);
+  background:var(--surface);border:1px solid var(--border-2);border-radius:var(--r-xl);
+  box-shadow:var(--sh-pop);display:flex;flex-direction:column;overflow:hidden;
+  animation:pop .26s var(--ease-out)}
+@keyframes pop{from{opacity:0;transform:translateY(14px) scale(.985)}to{opacity:1;transform:none}}
+.dlg .dh{display:flex;align-items:center;gap:var(--sp-3);padding:15px 18px;
+  border-bottom:1px solid var(--border)}
+.dlg .dh h2{font-size:14.5px;font-weight:650;margin:0;letter-spacing:-.15px}
+.dlg .dh .sub{font-size:11.5px;color:var(--text-3);margin-top:1px}
+.dlg .db{padding:18px;overflow:auto;flex:1;display:flex;flex-direction:column;gap:16px}
+.dlg .df{display:flex;align-items:center;gap:var(--sp-2);padding:13px 18px;
+  border-top:1px solid var(--border);background:var(--surface-2)}
+.dlg .df .gap{flex:1}
+.spacer{flex:1}
+
+.drw{position:fixed;z-index:61;top:0;right:0;bottom:0;width:min(560px,100%);
+  background:var(--surface);border-left:1px solid var(--border-2);box-shadow:var(--sh-pop);
+  display:flex;flex-direction:column;transform:translateX(100%);visibility:hidden;
+  transition:transform .3s var(--ease-out),visibility 0s .3s}
+.drw.open{transform:none;visibility:visible;transition:transform .3s var(--ease-out),visibility 0s 0s}
+.drw .dh{display:flex;align-items:center;gap:var(--sp-3);padding:16px 18px;border-bottom:1px solid var(--border)}
+.drw .dh h2{font-size:14.5px;font-weight:650;margin:0;letter-spacing:-.15px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.drw .db{padding:18px;overflow:auto;flex:1;display:flex;flex-direction:column;gap:16px}
+
+.grp{display:flex;flex-direction:column;gap:8px}
+.grp>.gl{font-size:10.5px;font-weight:650;color:var(--text-3);letter-spacing:.06em;
+  text-transform:uppercase}
+.frow{display:grid;gap:12px;grid-template-columns:1fr 1fr}
+.frow.t3{grid-template-columns:1fr 1fr 1fr}
+.divider{height:1px;background:var(--border);margin:2px 0}
+
+/* 地区选择 */
+.rgs{display:grid;gap:7px;grid-template-columns:repeat(auto-fill,minmax(146px,1fr));
+  max-height:250px;overflow:auto;padding:2px;margin:-2px}
+.rg{position:relative;text-align:left;border:1px solid var(--border-2);border-radius:var(--r);
+  background:var(--surface);padding:9px 11px;cursor:pointer;overflow:hidden;
+  transition:border-color var(--t-fast),background var(--t-fast),box-shadow var(--t-fast)}
+.rg:hover{border-color:var(--accent);background:var(--accent-soft)}
+.rg.on{border-color:var(--accent);background:var(--accent-soft);
+  box-shadow:0 0 0 1px var(--accent) inset}
+.rg b{display:block;font-size:12.5px;font-weight:600;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.rg em{display:block;font-style:normal;font-size:11px;color:var(--text-3);margin-top:2px;
+  font-family:var(--mono)}
+.rg.on em{color:var(--accent)}
+
+.stepper{display:inline-flex;align-items:center;border:1px solid var(--border-2);
+  border-radius:var(--r-sm);overflow:hidden;background:var(--surface);width:fit-content}
+.stepper button{width:34px;height:34px;border:0;background:transparent;color:var(--text-2);
+  cursor:pointer;display:grid;place-items:center;transition:background var(--t-fast)}
+.stepper button:hover:not(:disabled){background:var(--surface-2);color:var(--text)}
+.stepper button:disabled{opacity:.35;cursor:default}
+.stepper button svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round}
+.stepper input{width:60px;height:34px;border:0;border-left:1px solid var(--border);
+  border-right:1px solid var(--border);text-align:center;background:transparent;
+  font-family:var(--mono);font-size:14px;font-weight:600}
+.stepper input:focus{outline:none}
+
+/* 详情 */
+.kvs{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;font-size:12.5px;
+  padding:13px 15px;background:var(--surface-2);border:1px solid var(--border);
+  border-radius:var(--r)}
+.kvs dt{color:var(--text-3);font-size:11.5px;font-weight:600;align-self:center}
+.kvs dd{margin:0;font-family:var(--mono);font-size:12.5px;word-break:break-all;
+  display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.kvs dd .txt{font-family:var(--font)}
+
+.share{padding:10px 12px;background:var(--surface-2);border:1px solid var(--border);
+  border-radius:var(--r-sm);font-family:var(--mono);font-size:11.5px;line-height:1.65;
+  word-break:break-all;color:var(--text-2)}
+.share.acc{background:var(--accent-soft);border-color:var(--accent-ring);color:var(--text)}
+
+.clt{border:1px solid var(--border);border-radius:var(--r);padding:11px 12px;
+  background:var(--surface);transition:border-color var(--t-fast)}
+.clt:hover{border-color:var(--border-2)}
+.clt .ch{display:flex;align-items:center;gap:8px}
+.clt .em{font-size:12.5px;font-weight:620;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.clt .id{font-family:var(--mono);font-size:10.5px;color:var(--text-3);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px}
+.clt .share{margin-top:9px}
+.hdr-row{display:flex;align-items:center;gap:var(--sp-2)}
+.hdr-row h4{font-size:11px;font-weight:650;color:var(--text-3);letter-spacing:.06em;
+  text-transform:uppercase;margin:0}
+.hdr-row .n{font-size:11px;color:var(--text-3)}
+
+/* 设置页 */
+.set-wrap{display:grid;gap:var(--sp-4);grid-template-columns:repeat(auto-fit,minmax(340px,1fr));
+  align-items:start;max-width:1420px}
+.set-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);
+  box-shadow:var(--sh-1);overflow:hidden}
+.set-card>.h{padding:13px 16px;border-bottom:1px solid var(--border);display:flex;
+  align-items:center;gap:9px}
+.set-card>.h svg{width:15px;height:15px;stroke:var(--accent);fill:none;stroke-width:1.9;
+  stroke-linecap:round;stroke-linejoin:round}
+.set-card>.h h3{margin:0;font-size:13px;font-weight:640;flex:none;white-space:nowrap}
+.set-card>.h .sub{margin-left:auto;font-size:11px;color:var(--text-3)}
+/* 卡片标题右侧那排版本胶囊：窄屏放不下会叠成两行，行间得留点缝 */
+.set-card>.h .sub:has(.verpill){display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}
+.set-card>.b{padding:16px;display:flex;flex-direction:column;gap:15px}
+.set-foot{position:sticky;bottom:0;z-index:15;display:flex;align-items:center;gap:var(--sp-3);
+  padding:12px 16px;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r-lg);box-shadow:var(--sh-3)}
+.verpill{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--text-2);
+  background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-full);
+  padding:3px 11px;font-family:var(--mono)}
+.verpill b{color:var(--text);font-weight:600}
+
+/* Toast */
+.toasts{position:fixed;right:20px;bottom:20px;z-index:90;display:flex;
+  flex-direction:column;gap:9px;align-items:flex-end;pointer-events:none}
+.toast{pointer-events:auto;min-width:200px;max-width:390px;display:flex;align-items:flex-start;
+  gap:9px;padding:11px 13px;background:var(--surface);border:1px solid var(--border-2);
+  border-radius:var(--r);box-shadow:var(--sh-pop);font-size:12.5px;line-height:1.5;
+  animation:toastIn .26s var(--ease-out);position:relative;overflow:hidden}
+.toast.out{animation:toastOut .2s var(--ease) forwards}
+@keyframes toastIn{from{opacity:0;transform:translateY(12px) scale(.97)}to{opacity:1;transform:none}}
+@keyframes toastOut{to{opacity:0;transform:translateX(16px)}}
+.toast svg{width:15px;height:15px;flex:none;margin-top:1px;stroke:currentColor;fill:none;
+  stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round}
+.toast .tx{flex:1;word-break:break-word}
+.toast.ok{border-color:var(--ok-line)} .toast.ok>svg{color:var(--ok)}
+.toast.bad{border-color:var(--bad-line)} .toast.bad>svg{color:var(--bad)}
+.toast.info>svg{color:var(--accent)}
+.toast .bar{position:absolute;left:0;bottom:0;height:2px;background:var(--accent);
+  animation:tbar 3s linear forwards}
+.toast.ok .bar{background:var(--ok)} .toast.bad .bar{background:var(--bad)}
+@keyframes tbar{from{width:100%}to{width:0}}
+
+/* 新鲜度指示 */
+.fresh{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-3);
+  cursor:default;padding:0 4px}
+.fresh .d{width:6px;height:6px;border-radius:50%;background:var(--ok);
+  box-shadow:0 0 0 3px var(--ok-soft);transition:all var(--t)}
+.fresh.stale .d{background:var(--warn);box-shadow:0 0 0 3px var(--warn-soft)}
+.fresh.down .d{background:var(--bad);box-shadow:0 0 0 3px var(--bad-line)}
+
+.copyable{cursor:pointer;transition:color var(--t-fast)}
+.copyable:hover{color:var(--accent)}
+
+/* 响应式 */
+@media(max-width:1100px){.kpis{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}}
+@media(max-width:860px){
+  .sidebar{position:fixed;left:0;top:0;transform:translateX(-100%);
+    transition:transform .26s var(--ease-out);box-shadow:var(--sh-pop)}
+  body.sb-open .sidebar{transform:none}
+  body.sb-open .scrim{opacity:1;pointer-events:auto}
+  .scrim{position:fixed;inset:0;z-index:29;background:rgba(15,23,38,.4);
+    opacity:0;pointer-events:none;transition:opacity var(--t)}
+  .menu-btn{display:inline-flex}
+  .content{padding:var(--sp-4) var(--sp-3) 60px}
+  /* 手机端：顶栏那排胶囊同样占一整行、可横滑（结构在基础样式里），
+     这里只把左右内边距换成手机的值、再把胶囊压扁一点，
+     免得首尾两颗被屏幕边缘切成一半。 */
+  .topbar{padding:9px var(--sp-4) 0;row-gap:7px}
+  .topbar .spacer{display:none}
+  /* 窄屏折行会把正文往下推太多，所以这里改成一行横滑 */
+  .stats{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;
+    -webkit-overflow-scrolling:touch;margin:0 calc(-1 * var(--sp-4));padding:6px var(--sp-4) 8px;gap:6px}
+  .stats::-webkit-scrollbar{display:none}
+  .stat{height:24px;padding:0 8px;gap:5px}
+  .stat .k{font-size:10px}
+  .stat .bar{width:26px;height:6px}
+  .stat .v{font-size:10.5px}
+  .grid{grid-template-columns:1fr}
+  .frow,.frow.t3{grid-template-columns:1fr}
+  /* KPI 不跟着塌成一列：五张整宽卡片会把出口列表推到首屏之外，
+     150px 的下限在窄屏也还能并排两张 */
+  .kpis{grid-template-columns:repeat(auto-fit,minmax(148px,1fr))}
+  .drw{width:100%;border-left:0}
+  .dlg{padding:0;align-items:flex-end}
+  .dlg .box{width:100%;max-height:92vh;border-radius:var(--r-xl) var(--r-xl) 0 0}
+  .toasts{left:14px;right:14px;bottom:14px;align-items:stretch}
+  .toast{max-width:none}
+}
+@media(min-width:861px){.scrim{display:none}}
+@media(max-width:520px){
+  .acts .lbl{display:none}
+  .acts .btn{padding:0 9px}
+  .sec-head .toolbar{width:100%}
+}
+</style>
+</head>
+<body>
+<div class="scrim" id="scrim"></div>
+
+<div class="app">
+  <!-- ══════════ 侧栏 ══════════ -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M4 12h4"/><circle cx="4" cy="12" r="1.4"/>
+          <path d="M8 12 18 5"/><path d="M8 12h10"/><path d="M8 12l10 7"/>
+          <circle cx="19.6" cy="4.6" r="1.7"/><circle cx="19.6" cy="12" r="1.7"/>
+          <circle cx="19.6" cy="19.4" r="1.7"/></svg>
+      </div>
+      <div>
+        <div class="name">fanout</div>
+        <span class="tag">出口控制台</span>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <div class="nav-lbl">运行</div>
+      <button class="nav-item on" data-view="dashboard">
+        <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7.5" height="7.5" rx="1.6"/>
+          <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6"/>
+          <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6"/>
+          <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.6"/></svg>
+        出口总览 <span class="n" id="navExits">0</span>
+      </button>
+      <button class="nav-item" data-view="nodes">
+        <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/>
+          <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
+        节点链接 <span class="n" id="navNodes">0</span>
+      </button>
+      <button class="nav-item" data-view="sub">
+        <svg viewBox="0 0 24 24"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/>
+          <circle cx="5" cy="19" r="1.4"/></svg>
+        订阅
+      </button>
+      <div class="nav-lbl">配置</div>
+      <button class="nav-item" data-view="settings">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>
+          <circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="8" cy="18" r="2"/></svg>
+        设置与连接
+      </button>
+    </nav>
+
+    <div class="sb-foot">
+      <div class="sb-card">
+        <div class="k">节点后端</div>
+        <div class="v"><span class="mini-dot" id="sbDot"></span><span id="sbBackend">—</span></div>
+        <div class="sub" id="sbBackendSub">检测中…</div>
+      </div>
+      <div class="sb-tools">
+        <button class="nav-item" id="themeBtn" title="切换深浅色">
+          <svg viewBox="0 0 24 24" id="themeIcon"><circle cx="12" cy="12" r="4.2"/>
+            <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+          <span id="themeLbl">深色</span>
+        </button>
+        <button class="nav-item" id="logoutBtn" title="作废本机会话并回登录页">
+          <svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <path d="M16 17l5-5-5-5M21 12H9"/></svg>
+          <span>退出登录</span>
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ══════════ 主区 ══════════ -->
+  <div class="main">
+    <header class="topbar">
+      <button class="ico menu-btn" id="menuBtn" title="菜单">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+      <div>
+        <h1 id="pageTitle">出口总览</h1>
+      </div>
+      <div class="stats" id="stats" aria-label="本机负载"></div>
+      <div class="spacer"></div>
+      <span class="fresh" id="fresh" title="状态刷新"><span class="d"></span><span id="freshTxt">连接中…</span></span>
+      <button class="btn" id="refreshBtn" title="立即刷新">
+        <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+      </button>
+      <button class="btn primary" id="newexit">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        <span class="lbl">新建出口</span>
+      </button>
+    </header>
+
+    <!-- ── 总览 ── -->
+    <div class="content" id="view-dashboard">
+      <section class="kpis" id="kpis">
+        <div class="kpi">
+          <div class="k"><svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>在线出口</div>
+          <div class="v"><span id="kpiUp">0</span><span class="u" id="kpiUpTotal">/ 0</span></div>
+          <div class="s" id="kpiUpSub">还没有出口</div>
+          <svg class="ring" viewBox="0 0 76 76" id="kpiRing" hidden>
+            <circle class="bgc" cx="38" cy="38" r="33"/>
+            <circle class="fgc" cx="38" cy="38" r="33" stroke-dasharray="207.3" stroke-dashoffset="207.3"/>
+          </svg>
+        </div>
+        <div class="kpi">
+          <div class="k"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/>
+            <path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>可用节点</div>
+          <div class="v"><span id="kpiNodes">—</span></div>
+          <div class="s" id="kpiNodesSub">读取 VPN Gate 清单中…</div>
+        </div>
+        <div class="kpi">
+          <div class="k"><svg viewBox="0 0 24 24"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/>
+            <circle cx="12" cy="10" r="2.6"/></svg>覆盖地区</div>
+          <div class="v"><span id="kpiRegions">—</span><span class="u">个国家</span></div>
+          <div class="s" id="kpiRegionsSub">—</div>
+        </div>
+        <div class="kpi">
+          <div class="k"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/>
+            <path d="M8 21h8M12 17v4"/></svg>母机 IP</div>
+          <div class="v" style="font-size:17px"><span id="kpiIp">—</span></div>
+          <div class="s">客户端连这个地址，流量再从出口走</div>
+        </div>
+        <div class="kpi">
+          <div class="k"><svg viewBox="0 0 24 24"><path d="M12 2 4 6v6c0 5 3.4 8.6 8 10 4.6-1.4 8-5 8-10V6z"/>
+            <path d="m9 12 2 2 4-4"/></svg>节点链接</div>
+          <div class="v"><span id="kpiLinks">0</span><span class="u">条</span></div>
+          <div class="s" id="kpiLinksSub">—</div>
+        </div>
+      </section>
+
+      <div class="jobs" id="jobs"></div>
+
+      <!-- WARP 中转：状态与开关都摆在这儿，每条出口的接入点写在它自己的卡片上 -->
+      <section class="wbar" id="wbar">
+        <span class="wi"><svg viewBox="0 0 24 24"><path d="M12 2 4 6v6c0 5 3.4 8.6 8 10 4.6-1.4 8-5 8-10V6z"/>
+          <path d="m9 12 2 2 4-4"/></svg></span>
+        <div class="tx">
+          <div class="tt">WARP 中转 <span class="badge idle" id="wbarBadge">读取中</span></div>
+          <div class="ss" id="wbarSub">正在读取中转状态…</div>
+        </div>
+        <div class="mm">
+          <span class="ver" id="wbarVer" hidden></span>
+          <label class="sw" title="开启后每条出口的流量先经 Cloudflare WARP 再到节点">
+            <input type="checkbox" id="wbarSw"><span class="track"></span>
+          </label>
+        </div>
+      </section>
+
+      <section class="sec-head">
+        <h2>出口 <span class="n" id="ecount">0</span></h2>
+        <div class="seg" id="filters">
+          <button class="on" data-f="">全部 <span class="c" id="fcAll">0</span></button>
+          <button data-f="up">已连通 <span class="c" id="fcUp">0</span></button>
+          <button data-f="starting">连接中 <span class="c" id="fcStarting">0</span></button>
+          <button data-f="failed">失败 <span class="c" id="fcFailed">0</span></button>
+        </div>
+        <div class="search" style="max-width:210px">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+          <input class="inp" id="q" type="search" placeholder="搜 IP / 国家 / 节点">
+        </div>
+        <div class="spacer"></div>
+        <div class="acts">
+          <button class="btn sm" id="subBtn">
+            <svg viewBox="0 0 24 24"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/><circle cx="5" cy="19" r="1"/></svg>
+            <span class="lbl">订阅</span>
+          </button>
+          <button class="btn sm" id="exportAll">
+            <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <path d="M7 10l5 5 5-5M12 15V3"/></svg>
+            <span class="lbl">导出链接</span>
+          </button>
+          <button class="btn sm" id="newnode">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v8M8 12h8"/></svg>
+            <span class="lbl">新建节点</span>
+          </button>
+          <button class="btn sm" id="stopall">
+            <svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.6"/></svg>
+            <span class="lbl">全部停止</span>
+          </button>
+          <div class="seg" id="layoutSeg">
+            <button class="on" data-l="grid" title="卡片">
+              <svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1.6"/>
+                <rect x="13" y="3" width="8" height="8" rx="1.6"/><rect x="3" y="13" width="8" height="8" rx="1.6"/>
+                <rect x="13" y="13" width="8" height="8" rx="1.6"/></svg>
+            </button>
+            <button data-l="list" title="列表">
+              <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <div class="grid" id="list"></div>
+      <div id="pools"></div>
+      <div id="orphans"></div>
+    </div>
+
+    <!-- ── 节点链接 ── -->
+    <div class="content" id="view-nodes" hidden>
+      <section class="sec-head">
+        <h2>全部节点链接 <span class="n" id="nodesCount">0</span></h2>
+        <div class="search" style="max-width:240px">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.6-3.6"/></svg>
+          <input class="inp" id="nq" type="search" placeholder="搜备注 / 协议 / 端口">
+        </div>
+        <div class="spacer"></div>
+        <div class="acts">
+          <button class="btn sm" id="exportBound">
+            <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <path d="M7 10l5 5 5-5M12 15V3"/></svg>
+            <span class="lbl">导出已绑定</span>
+          </button>
+          <button class="btn sm" id="exportAllNodes">
+            <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <path d="M7 10l5 5 5-5M12 15V3"/></svg>
+            <span class="lbl">导出全部</span>
+          </button>
+        </div>
+      </section>
+      <div class="panel">
+        <table class="tbl">
+          <thead><tr>
+            <th>备注</th><th>协议</th><th>端口</th><th>出口</th><th>状态</th><th class="r">操作</th>
+          </tr></thead>
+          <tbody id="nodesBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── 订阅 ── -->
+    <div class="content" id="view-sub" hidden>
+      <section class="set-card" style="max-width:660px">
+        <div class="h">
+          <svg viewBox="0 0 24 24"><path d="M4 11a9 9 0 0 1 9 9"/><path d="M4 4a16 16 0 0 1 16 16"/>
+            <circle cx="5" cy="19" r="1.4"/></svg>
+          <h3>订阅地址</h3>
+          <span class="sub" id="subcount"></span>
+        </div>
+        <div class="b">
+          <div class="field">
+            <label>填进客户端的订阅即可</label>
+            <input class="inp mono" id="suburl" type="text" spellcheck="false" readonly>
+          </div>
+          <div class="hint">以后加出口、删出口都会自己跟上。换节点不影响它——端口不变，链接也不变。</div>
+          <div class="hint bad">地址最后那串口令等于密码，别发群里。</div>
+          <div class="divider"></div>
+          <div class="acts">
+            <button class="btn primary" id="subcopy">
+              <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              复制地址
+            </button>
+            <button class="btn" id="subreset">
+              <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+              换一串口令
+            </button>
+          </div>
+          <div class="divider"></div>
+          <div class="grp">
+            <div class="gl">可选参数</div>
+            <div class="hint">想看明文而不是 base64，地址后面加 <code>&amp;target=links</code>；
+              想把直连节点也混进来，加 <code>&amp;bound=0</code>。</div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ── 设置 ── -->
+    <div class="content" id="view-settings" hidden>
+      <div class="set-wrap">
+        <div style="display:flex;flex-direction:column;gap:var(--sp-4)">
+          <section class="set-card">
+            <div class="h">
+              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/>
+                <path d="M8 21h8M12 17v4"/></svg>
+              <h3>访问安全</h3>
+            </div>
+            <div class="b">
+              <div class="field">
+                <label>访问口令</label>
+                <input class="inp" id="setPw" type="password" spellcheck="false"
+                       autocomplete="new-password" placeholder="留空则不改">
+                <div class="hint">改完只影响新登录，当前这个浏览器不会被踢下线。</div>
+              </div>
+              <div class="field">
+                <label>访问路径</label>
+                <input class="inp mono" id="setPath" type="text" spellcheck="false"
+                       placeholder="留空则去掉路径前缀">
+                <div class="hint" id="setPathHint">界面挂在这个路径下，扫端口的探不到。只能用字母数字和 - _。</div>
+              </div>
+              <div class="frow">
+                <div class="field">
+                  <label>监听端口</label>
+                  <input class="inp mono" id="setPort" type="text" inputmode="numeric" spellcheck="false">
+                </div>
+                <div class="field">
+                  <label>本地监听地址</label>
+                  <select class="inp" id="setListen">
+                    <option value="0.0.0.0">所有网卡（0.0.0.0）</option>
+                    <option value="127.0.0.1">仅本机（127.0.0.1）</option>
+                  </select>
+                </div>
+              </div>
+              <div class="hint bad" id="setPortHint">改端口或监听地址会切换监听，保存后要用新地址重新打开界面。</div>
+            </div>
+          </section>
+
+          <section class="set-card">
+            <div class="h">
+              <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/>
+                <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
+              <h3>节点后端</h3>
+            </div>
+            <div class="b">
+              <div class="field">
+                <label>节点从哪来</label>
+                <select class="inp" id="setBackend"></select>
+                <div class="hint" id="setBackendHint">装了 3x-ui 或 xray-cf-lite 就能直接接管，都没有就用自建。</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="set-card">
+            <div class="h">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/></svg>
+              <h3>更新</h3>
+              <span class="sub"><span class="verpill"><b id="updCur">-</b><span id="updLatest"></span></span></span>
+            </div>
+            <div class="b">
+              <div class="acts">
+                <button class="btn" id="updCheck">
+                  <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+                  检查更新
+                </button>
+                <button class="btn primary" id="updApply" hidden>
+                  <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <path d="M7 10l5 5 5-5M12 15V3"/></svg>
+                  更新到 <span id="updApplyVer"></span>
+                </button>
+              </div>
+              <div class="share" id="updNotes" hidden style="white-space:pre-wrap;font-family:var(--font);font-size:12px"></div>
+            </div>
+          </section>
+
+          <section class="set-card">
+            <div class="h">
+              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/>
+                <rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>
+              <h3>内置客户端</h3>
+              <span class="sub">
+                <span class="verpill">Xray <b id="cliXray">-</b><span id="cliXrayLatest"></span></span>
+                <span class="verpill">openvpn <b id="cliOvpn">-</b><span id="cliOvpnLatest"></span></span>
+                <span class="verpill">WARP <b id="cliWarp">-</b><span id="cliWarpLatest"></span></span>
+              </span>
+            </div>
+            <div class="b">
+              <div class="hint" id="cliXrayHint">读取中…</div>
+              <div class="acts">
+                <button class="btn" id="cliCheck">
+                  <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+                  检查更新
+                </button>
+                <button class="btn primary" id="cliApply" hidden>
+                  <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <path d="M7 10l5 5 5-5M12 15V3"/></svg>
+                  更新到 <span id="cliApplyVer"></span>
+                </button>
+                <button class="btn primary" id="cliOvpnApply" hidden>
+                  <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                    <path d="M7 10l5 5 5-5M12 15V3"/></svg>
+                  升级 openvpn 到 <span id="cliOvpnApplyVer"></span>
+                </button>
+                <button class="btn primary" id="cliWarpApply" hidden>
+                  <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+                  按 <span id="cliWarpApplyVer"></span> 重新注册 WARP
+                </button>
+                <button class="btn" id="cliOvpnRepoOff" hidden>
+                  <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+                  撤销官方源
+                </button>
+                <button class="btn" id="cliOvpnBuild" hidden>
+                  <svg viewBox="0 0 24 24"><path d="M8 4L3 10l5 6"/><path d="M3 10h11"/>
+                    <path d="M16 20l5-6-5-6"/><path d="M21 14H10"/></svg>
+                  自己编译 openvpn <span id="cliOvpnBuildVer"></span>
+                </button>
+                <button class="btn" id="cliOvpnSrcOff" hidden>
+                  <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+                  撤销源码版
+                </button>
+              </div>
+              <div class="hint" id="cliOvpnJob" hidden style="white-space:pre-wrap"></div>
+              <div class="hint" id="cliOvpnNote" hidden style="white-space:pre-wrap"></div>
+              <div class="divider" id="cliWarpDiv" hidden></div>
+              <div class="hint" id="cliWarpNote" hidden style="white-space:pre-wrap"></div>
+            </div>
+          </section>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:var(--sp-4)">
+          <section class="set-card">
+            <div class="h">
+              <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+              <h3>选节点策略</h3>
+            </div>
+            <div class="b">
+              <label class="sw"><input type="checkbox" id="setResi"><span class="track"></span>
+                <span>只用家宽节点</span></label>
+              <div class="hint" id="setResiHint">vpngate 里混着一批它自己的机房机器，出口一眼看得出是数据中心。
+                开着就只挑志愿者家宽。</div>
+              <div class="divider"></div>
+              <div class="field">
+                <label>挑节点排序</label>
+                <select class="inp" id="setScoreMode">
+                  <option value="speed">速度优先（原版）</option>
+                  <option value="idle">空闲优先（在线人数少 + 延迟）</option>
+                  <option value="ping">延迟优先</option>
+                  <option value="balanced">综合（速度 + 空闲 + 延迟）</option>
+                </select>
+                <div class="hint" id="setScoreHint">VPN Gate 的 Speed 是历史实验室数值，不代表现在有空；
+                  繁忙节点更容易握手失败。综合策略最稳。</div>
+              </div>
+              <div class="field">
+                <label>节点清单有效期（秒）</label>
+                <input class="inp mono" id="setNodeTtl" type="text" inputmode="numeric">
+                <div class="hint">清单很大，过期前重复请求都用缓存，避免重连风暴时把带宽吃满。</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="set-card">
+            <div class="h">
+              <svg viewBox="0 0 24 24"><path d="M12 2 4 6v6c0 5 3.4 8.6 8 10 4.6-1.4 8-5 8-10V6z"/>
+                <path d="m9 12 2 2 4-4"/></svg>
+              <h3>隧道保活与自愈</h3>
+            </div>
+            <div class="b">
+              <div class="frow">
+                <div class="field">
+                  <label>健康检查间隔（秒）</label>
+                  <input class="inp mono" id="setHealthInterval" type="text" inputmode="numeric">
+                </div>
+                <div class="field">
+                  <label>连续失败判定（次）</label>
+                  <input class="inp mono" id="setHealthFails" type="text" inputmode="numeric">
+                </div>
+              </div>
+              <div class="frow">
+                <div class="field">
+                  <label>探活超时（秒）</label>
+                  <input class="inp mono" id="setHealthTimeout" type="text" inputmode="numeric">
+                </div>
+                <div class="field">
+                  <label>单节点连接上限（秒）</label>
+                  <input class="inp mono" id="setConnectBudget" type="text" inputmode="numeric">
+                </div>
+              </div>
+              <div class="frow">
+                <div class="field">
+                  <label>重连退避下限（秒）</label>
+                  <input class="inp mono" id="setBackoffMin" type="text" inputmode="numeric">
+                </div>
+                <div class="field">
+                  <label>重连退避上限（秒）</label>
+                  <input class="inp mono" id="setBackoffMax" type="text" inputmode="numeric">
+                </div>
+              </div>
+              <div class="hint">间隔越短发现掉线越快，但每条隧道都在母机上起一个探测进程，别压太狠。</div>
+            </div>
+          </section>
+
+          <section class="set-card">
+            <div class="h">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/>
+                <path d="M12 8v8M8 12h8"/></svg>
+              <h3>重试与面板</h3>
+            </div>
+            <div class="b">
+              <div class="frow">
+                <div class="field">
+                  <label>每轮候选节点数</label>
+                  <input class="inp mono" id="setMaxTries" type="text" inputmode="numeric">
+                </div>
+                <div class="field">
+                  <label>面板写入合并（毫秒）</label>
+                  <input class="inp mono" id="setPanelDebounce" type="text" inputmode="numeric">
+                </div>
+              </div>
+              <div class="hint">合并窗口决定多久批量重启一次 Xray。多条隧道同时重连时，
+                窗口越大越不会把已连上的客户端反复踢掉。</div>
+              <div class="divider"></div>
+              <label class="sw"><input type="checkbox" id="setAeadOnly"><span class="track"></span>
+                <span>数据通道只要 AEAD（放开内核 offload）</span></label>
+              <div class="hint">openvpn 2.7 一带 CBC 兜底就自己禁用内核 data channel offload。
+                打开后走内核加解密、母机更省。只对节点配置里声明支持 AEAD 的出口生效——
+                VPN Gate 的节点大多写死 AES-128-CBC，那种出口继续按原来的算法连。
+                需要本机 openvpn ≥2.5，老版本上这个开关不起作用。</div>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <div class="set-foot">
+        <button class="btn primary" id="setSave">
+          <svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>
+          保存全部设置
+        </button>
+        <button class="btn" id="setCancel">放弃修改</button>
+        <div class="spacer"></div>
+        <span class="hint" id="setSaved">改动不会自动生效，需要点保存</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 新建出口向导 ══════════ -->
+<div class="scr" id="scr"></div>
+<div class="dlg" id="wizard">
+  <div class="box">
+    <div class="dh">
+      <div>
+        <h2>新建出口</h2>
+        <div class="sub">选地区和数量，fanout 并行拉起隧道并按模板复制节点链接</div>
+      </div>
+      <div class="spacer"></div>
+      <button class="ico" data-close="wizard" title="关闭">
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="db">
+      <div class="grp">
+        <div class="gl">1 · 地区</div>
+        <input class="inp" id="rgfilter" type="search" placeholder="筛选地区，比如 日本 / JP">
+        <div class="rgs" id="regions"></div>
+      </div>
+      <div class="divider"></div>
+      <div class="grp">
+        <div class="gl">2 · 规模</div>
+        <div class="field">
+          <label id="countlabel">数量</label>
+          <div class="stepper">
+            <button id="minus" title="减少"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+            <input id="count" type="text" inputmode="numeric" value="3">
+            <button id="plus" title="增加"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+          </div>
+          <div class="hint" id="availhint"></div>
+        </div>
+      </div>
+      <div class="grp" id="tplwrap">
+        <div class="gl">3 · 节点链接模板</div>
+        <div class="field">
+          <label>每个出口复制一条</label>
+          <select class="inp" id="tpl"></select>
+          <div class="hint" id="tplhint"></div>
+        </div>
+      </div>
+    </div>
+    <div class="df">
+      <span class="hint" id="wzhint"></span>
+      <div class="spacer"></div>
+      <button class="btn" data-close="wizard">取消</button>
+      <button class="btn primary" id="go">
+        <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        开始
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 新建节点 ══════════ -->
+<div class="dlg" id="newnodebox">
+  <div class="box" style="width:min(600px,100%)">
+    <div class="dh">
+      <div>
+        <h2>新建节点</h2>
+        <div class="sub">只露出当前协议组合真正用得上的字段</div>
+      </div>
+      <div class="spacer"></div>
+      <button class="ico" data-close="newnodebox" title="关闭">
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="db">
+      <div class="frow t3">
+        <div class="field"><label>协议</label>
+          <select class="inp" id="nproto">
+            <option value="vless">VLESS</option><option value="vmess">VMess</option>
+            <option value="trojan">Trojan</option></select></div>
+        <div class="field"><label>传输</label>
+          <select class="inp" id="nnet">
+            <option value="tcp">TCP</option><option value="ws">WebSocket</option>
+            <option value="grpc">gRPC</option><option value="httpupgrade">HTTPUpgrade</option>
+            <option value="xhttp">XHTTP</option></select></div>
+        <div class="field"><label>安全</label>
+          <select class="inp" id="nsec">
+            <option value="none">无</option><option value="tls">TLS</option>
+            <option value="reality">REALITY</option></select></div>
+      </div>
+      <div class="hint" id="nsechint"></div>
+      <div class="divider"></div>
+      <label class="sw" id="nvisionwrap"><input type="checkbox" id="nvision">
+        <span class="track"></span><span>启用 xtls-rprx-vision 流控</span></label>
+      <div class="field" id="nsniwrap"><label>域名 SNI</label>
+        <input class="inp mono" id="nsni" type="text" placeholder="留空用 localhost，将生成自签证书"></div>
+      <div class="frow" id="ncertkeywrap" hidden>
+        <div class="field" id="ncertwrap"><label>证书路径</label>
+          <input class="inp mono" id="ncert" type="text" placeholder="留空生成自签，如 /etc/ssl/x.crt"></div>
+        <div class="field" id="nkeywrap"><label>私钥路径</label>
+          <input class="inp mono" id="nkey" type="text" placeholder="与证书成对填写"></div>
+      </div>
+      <div class="field" id="ndestwrap"><label>借用站点</label>
+        <input class="inp mono" id="ndest" type="text" placeholder="留空用 www.tesla.com:443"></div>
+      <div class="field" id="npathwrap"><label id="npathlabel">路径</label>
+        <input class="inp mono" id="npath" type="text" placeholder="留空自动生成"></div>
+      <div class="divider"></div>
+      <div class="frow">
+        <div class="field"><label>端口</label>
+          <input class="inp mono" id="nport" type="text" inputmode="numeric" placeholder="留空随机分配"></div>
+        <div class="field"><label>备注</label>
+          <input class="inp" id="nremark" type="text" placeholder="留空自动命名"></div>
+      </div>
+    </div>
+    <div class="df">
+      <span class="hint" id="nnhint"></span>
+      <div class="spacer"></div>
+      <button class="btn" data-close="newnodebox">取消</button>
+      <button class="btn primary" id="ncreate">创建</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 节点详情（抽屉） ══════════ -->
+<div class="drw" id="detail">
+  <div class="dh">
+    <h2 id="dtitle">节点</h2>
+    <div class="spacer"></div>
+    <button class="ico danger" id="ddel" title="删除这个入站">
+      <svg viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+    </button>
+    <button class="ico" data-close="detail" title="关闭">
+      <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="db" id="dbody"></div>
+</div>
+
+<!-- ══════════ SOCKS5 凭据 ══════════ -->
+<div class="dlg" id="credbox">
+  <div class="box" style="width:min(520px,100%)">
+    <div class="dh">
+      <div><h2>SOCKS5 访问凭据</h2><div class="sub" id="crtitle"></div></div>
+      <div class="spacer"></div>
+      <button class="ico" data-close="credbox" title="关闭">
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="db">
+      <div class="grp">
+        <div class="gl">连接地址</div>
+        <div class="share acc" id="crurl"></div>
+      </div>
+      <div class="frow">
+        <div class="field"><label>用户名</label>
+          <input class="inp mono" id="cruser" type="text" spellcheck="false"></div>
+        <div class="field"><label>口令</label>
+          <input class="inp mono" id="crpass" type="text" spellcheck="false"></div>
+      </div>
+      <div class="acts">
+        <button class="btn sm" id="crrand">
+          <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+          随机生成一套
+        </button>
+      </div>
+      <div class="hint">改完立即生效，已连上的会话不断；用旧凭据的客户端要改配置。</div>
+    </div>
+    <div class="df">
+      <button class="btn" id="crcopy">
+        <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        复制地址
+      </button>
+      <div class="spacer"></div>
+      <button class="btn" data-close="credbox">取消</button>
+      <button class="btn primary" id="crsave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 出口组编辑 ══════════ -->
+<div class="dlg" id="pooldlg">
+  <div class="box" style="width:min(620px,100%)">
+    <div class="dh">
+      <div><h2 id="poodlgtitle">新建出口组</h2>
+        <div class="sub">一条节点链接同时绑多个出口，组内按策略选路以保活</div></div>
+      <div class="spacer"></div>
+      <button class="ico" data-close="pooldlg" title="关闭">
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="db">
+      <div class="field"><label>组名</label>
+        <input class="inp" id="poname" type="text" spellcheck="false" placeholder="例：日本保活组"></div>
+
+      <div class="grp">
+        <div class="gl">选路策略</div>
+        <div class="seg" id="pomode"></div>
+        <div class="hint" id="podesc"></div>
+      </div>
+
+      <div class="field" id="postepwrap"><label>轮询步长（每隔几个新目标换一条出口）</label>
+        <input class="inp" id="postep" type="number" min="1" max="1000" step="1" value="5"></div>
+
+      <div class="grp">
+        <div class="gl">成员出口 <span class="n" id="pomsel"></span></div>
+        <div class="pb-list" id="pohosts"></div>
+        <div class="hint">勾选的出口组成这个组。某条换了节点，组里会自动跟着改名，绑定不用重做。</div>
+      </div>
+
+      <div class="grp">
+        <label class="sw"><input type="checkbox" id="poofill"><span class="track"></span>
+          <span>掉线自动补新出口</span></label>
+        <div class="field" id="posizewrap" style="margin-top:var(--sp-3)"><label>维持可用条数</label>
+          <input class="inp" id="posize" type="number" min="1" max="32" step="1" value="2"></div>
+        <div class="hint" id="pofillhint">开着时组里哪条出口连不上，就用此刻在线的出口立刻顶上来（不限地区），
+          在线的不够才新建一条；维持条数不会因为掉线变小。绑在它上面的节点链接不用重做。
+          槽位不够时先补能补的，并在组上写明还差几条。</div>
+      </div>
+    </div>
+    <div class="df">
+      <div class="hint" id="pook"></div>
+      <div class="spacer"></div>
+      <button class="btn" data-close="pooldlg">取消</button>
+      <button class="btn primary" id="posave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ 导出 ══════════ -->
+<div class="dlg" id="export">
+  <div class="box" style="width:min(760px,100%)">
+    <div class="dh">
+      <div><h2>节点链接</h2><div class="sub" id="excount"></div></div>
+      <div class="spacer"></div>
+      <button class="btn sm" id="copyall">
+        <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        全部复制
+      </button>
+      <button class="ico" data-close="export" title="关闭">
+        <svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="db"><textarea class="inp" id="exbox" spellcheck="false" readonly
+      style="min-height:340px"></textarea></div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

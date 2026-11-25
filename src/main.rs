@@ -1,13 +1,19 @@
 mod api;
+mod appstate;
 mod auth;
 mod config;
+mod factory;
 mod jobs;
+mod manager;
 mod models;
 mod nodecache;
 mod nodes;
 mod panel;
+mod panel_native;
 mod panel_xcl;
+mod panel_xui;
 mod pools_logic;
+mod runtime;
 mod socks5;
 mod state;
 mod sub;
@@ -16,8 +22,12 @@ mod warp_logic;
 mod web;
 
 use anyhow::Result;
-use axum::{routing::get, Router};
-use std::{net::SocketAddr, path::PathBuf};
+use axum::{
+    routing::{get, post},
+    Router,
+};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use tokio::sync::RwLock;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -98,6 +108,29 @@ async fn main() -> Result<()> {
         tracing::info!("已生成访问路径，见 {}", dir.join("basepath").display());
     }
 
+    let settings = Arc::new(RwLock::new(settings));
+    let jobs = jobs::JobStore::new();
+    let manager = manager::Manager::new(
+        dir.clone(),
+        args.max.unwrap_or(20),
+        settings,
+        jobs,
+        Arc::new(factory::UnavailableFactory),
+    );
+    let state = Arc::new(appstate::AppState {
+        auth,
+        manager: manager.clone(),
+        dir: dir.clone(),
+        basepath: basepath.clone(),
+    });
+    if let Err(e) = manager.restore().await {
+        tracing::warn!("恢复隧道状态失败: {e}");
+    }
+    let health_manager = manager.clone();
+    tokio::spawn(async move {
+        health_manager.health_loop().await;
+    });
+
     let tag = if dir == PathBuf::from("/var/lib/fanout") {
         String::new()
     } else {
@@ -121,25 +154,29 @@ async fn main() -> Result<()> {
         .route("/:file", get(web::asset))
         .route("/api/health", get(api::health))
         .route("/api/exits", get(api::exits))
+        .route("/api/tunnels", get(api::tunnels))
         .route("/api/nodes", get(api::nodes))
         .route("/api/regions", get(api::regions))
-        .route("/api/pools", get(api::pools))
+        .route("/api/start", get(api::start))
+        .route("/api/stop", get(api::stop))
+        .route("/api/swap", get(api::swap))
+        .route("/api/cred", get(api::cred))
+        .route("/api/refresh", get(api::refresh))
+        .route("/api/provision", get(api::provision))
         .route("/api/jobs", get(api::jobs))
+        .route("/api/jobs/dismiss", get(api::job_dismiss))
+        .route("/api/pools", get(api::pools))
         .route("/api/warp", get(api::warp).post(api::not_implemented))
         .route("/api/stats", get(api::stats))
         .route("/api/client/status", get(api::client_status))
         .route("/api/xui", get(api::xui_status))
-        .route("/sub", get(api::not_implemented));
+        .route("/sub", get(api::subscription))
+        .route("/api/settings", get(api::settings).post(api::settings))
+        .route("/api/sub", get(api::sub_info))
+        .route("/api/sub/reset", post(api::sub_reset))
+        .route("/api/update/check", get(api::update_check));
 
     for path in [
-        "/api/tunnels",
-        "/api/start",
-        "/api/stop",
-        "/api/swap",
-        "/api/cred",
-        "/api/refresh",
-        "/api/provision",
-        "/api/jobs/dismiss",
         "/api/client/warp/apply",
         "/api/xui/inbounds",
         "/api/xui/bind",
@@ -156,10 +193,6 @@ async fn main() -> Result<()> {
         "/api/panel/client/del",
         "/api/panel/client/reset",
         "/api/panel/mode",
-        "/api/sub",
-        "/api/sub/reset",
-        "/api/settings",
-        "/api/update/check",
         "/api/update/apply",
         "/api/client/xray/apply",
         "/api/client/openvpn/apply",
@@ -169,13 +202,15 @@ async fn main() -> Result<()> {
     ] {
         app = app.route(path, get(api::not_implemented).post(api::not_implemented));
     }
-    let app = app.layer(axum::middleware::from_fn_with_state(
-        auth,
-        auth::require_auth,
-    ));
+    let app = app
+        .with_state(state.clone())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ));
     let app = Router::new().nest(&format!("/{basepath}"), app);
 
-    let addr: SocketAddr = settings.listen().parse()?;
+    let addr: SocketAddr = settings.read().await.listen().parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("管理界面监听已切换到 {addr}");
 
@@ -197,5 +232,6 @@ async fn main() -> Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await?;
+    manager.shutdown().await;
     Ok(())
 }

@@ -16,7 +16,10 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-use crate::util::{atomic_write, random_token, read_trim};
+use crate::{
+    appstate::AppState,
+    util::{atomic_write, random_token, read_trim},
+};
 
 pub const SESSION_COOKIE: &str = "fanout_session";
 const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
@@ -147,11 +150,12 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
 }
 
 pub async fn login(
-    State(auth): State<Arc<Auth>>,
+    State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
+    let auth = &state.auth;
     let ip = client_ip(&headers, peer.ip());
     if auth.blocked(&ip).await {
         return (
@@ -177,7 +181,8 @@ pub async fn login(
     (h, Json(json!({"ok": true}))).into_response()
 }
 
-pub async fn logout(State(auth): State<Arc<Auth>>, headers: HeaderMap) -> Response {
+pub async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let auth = &state.auth;
     if let Some(t) = cookie_token(&headers) {
         auth.revoke(&t).await;
     }
@@ -191,7 +196,12 @@ pub async fn logout(State(auth): State<Arc<Auth>>, headers: HeaderMap) -> Respon
     (h, Json(json!({"ok": true}))).into_response()
 }
 
-pub async fn require_auth(State(auth): State<Arc<Auth>>, req: Request, next: Next) -> Response {
+pub async fn require_auth(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let auth = &state.auth;
     let path = req.uri().path().to_string();
     if path == "/login" || path == "/logout" || path == "/sub" {
         return next.run(req).await;

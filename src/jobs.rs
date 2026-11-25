@@ -94,12 +94,17 @@ impl JobStore {
     }
 }
 
+#[derive(Clone)]
 pub struct JobHandle {
     jobs: Arc<Mutex<Vec<Job>>>,
     id: String,
 }
 
 impl JobHandle {
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+
     pub async fn set(&self, i: usize, status: &str, detail: &str) {
         let mut jobs = self.jobs.lock().await;
         if let Some(j) = jobs.iter_mut().find(|j| j.id == self.id) {

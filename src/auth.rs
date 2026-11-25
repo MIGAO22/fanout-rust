@@ -1,6 +1,6 @@
 use anyhow::Result;
 use axum::{
-    extract::{Form, Request, State},
+    extract::{ConnectInfo, Form, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -21,7 +21,6 @@ use crate::util::{atomic_write, random_token, read_trim};
 pub const SESSION_COOKIE: &str = "fanout_session";
 const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 
-#[derive(Default)]
 struct Failures {
     count: u32,
     at: Instant,
@@ -129,18 +128,11 @@ impl Auth {
     }
 }
 
-fn client_ip(req: &Request) -> String {
-    if let Some(v) = req
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-    {
+fn client_ip(headers: &HeaderMap, peer: IpAddr) -> String {
+    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         return v.split(',').next().unwrap_or(v).trim().to_string();
     }
-    req.extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|v| v.ip().to_string())
-        .unwrap_or_else(|| "unknown".into())
+    peer.to_string()
 }
 
 fn cookie_token(headers: &HeaderMap) -> Option<String> {
@@ -156,10 +148,11 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
 
 pub async fn login(
     State(auth): State<Arc<Auth>>,
-    req: Request,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    let ip = client_ip(&req);
+    let ip = client_ip(&headers, peer.ip());
     if auth.blocked(&ip).await {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -184,8 +177,8 @@ pub async fn login(
     (h, Json(json!({"ok": true}))).into_response()
 }
 
-pub async fn logout(State(auth): State<Arc<Auth>>, req: Request) -> Response {
-    if let Some(t) = cookie_token(req.headers()) {
+pub async fn logout(State(auth): State<Arc<Auth>>, headers: HeaderMap) -> Response {
+    if let Some(t) = cookie_token(&headers) {
         auth.revoke(&t).await;
     }
     let mut h = HeaderMap::new();

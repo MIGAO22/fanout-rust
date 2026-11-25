@@ -33,6 +33,7 @@ struct TestServer {
 
 impl TestServer {
     async fn new(status: &str, body: String) -> Self {
+        let status = status.to_string();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let hit = Arc::new(AtomicBool::new(false));

@@ -1132,7 +1132,7 @@ fn wireguard_install_plan_unknown_distro() {
 }
 
 #[test]
-fn wireguard_install_hint() {
+fn wireguard_install_hint_cases() {
     let cases = [
         (
             "rpm",

@@ -198,8 +198,9 @@ pub fn now_unix() -> i64 {
 }
 
 pub fn temp_dir(prefix: &str) -> Result<PathBuf> {
-    tempfile::Builder::new()
+    Ok(tempfile::Builder::new()
         .prefix(prefix)
         .tempdir()
-        .map(|d| d.keep())
+        .map_err(Into::into)?
+        .keep())
 }

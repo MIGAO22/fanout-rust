@@ -1,16 +1,11 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use csv::ReaderBuilder;
+use ipnet::Ipv4Net;
 use rand::Rng;
 use reqwest::{header::HeaderValue, Client, StatusCode};
 use serde_json::{json, Value};
-use std::{
-    collections::HashMap,
-    net::{IpAddr, Ipv4Net},
-    num::IntErrorKind,
-    str::FromStr,
-    time::Duration,
-};
+use std::{collections::HashMap, net::IpAddr, num::IntErrorKind, str::FromStr, time::Duration};
 
 use crate::models::{Node, SocksCred};
 
@@ -110,7 +105,10 @@ pub fn parse_node_csv(body: &str, score_mode: &str) -> Result<Vec<Node>> {
         .has_headers(false)
         .flexible(true)
         .from_reader(input.as_bytes());
-    let records = reader.read_all().context("解析节点 CSV 失败")?;
+    let records = reader
+        .records()
+        .collect::<Result<Vec<_>, _>>()
+        .context("解析节点 CSV 失败")?;
     let Some(header) = records.first() else {
         anyhow::bail!("节点列表格式异常: 缺少表头");
     };

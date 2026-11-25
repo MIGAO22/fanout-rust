@@ -194,7 +194,7 @@ impl TunnelRuntime for LinuxTunnelRuntime {
         self.netns.setup(&direct)?;
         *self.node.write().await = Some(node.clone());
         let settings = self.settings.read().await.clone();
-        let acc: Option<WarpAccount> = if settings.warp.enabled {
+        let acc: Option<WarpAccount> = if settings.warp().enabled {
             let svc = self
                 .warp
                 .as_ref()
@@ -314,7 +314,8 @@ impl TunnelRuntime for LinuxTunnelRuntime {
                 Ok(out) => {
                     let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     if let Ok(v4) = ip.parse::<Ipv4Addr>() {
-                        if self.settings.read().await.warp.enabled && warp_exit_is_transit_only(&ip)
+                        if self.settings.read().await.warp().enabled
+                            && warp_exit_is_transit_only(&ip)
                         {
                             reason = format!("出口只走到了 Cloudflare 中转（{ip}），没走节点");
                             continue;
@@ -343,14 +344,14 @@ impl TunnelRuntime for LinuxTunnelRuntime {
         if !tun0_up(&self.netns.name()) {
             return false;
         }
-        if self.settings.read().await.warp.enabled {
+        if self.settings.read().await.warp().enabled {
             return self.transit_status().await.1;
         }
         netns_has_default(&self.netns.name())
     }
 
     async fn guard_transit(&self) -> Result<()> {
-        if !self.settings.read().await.warp.enabled {
+        if !self.settings.read().await.warp().enabled {
             return Ok(());
         }
         let node = self.node.read().await.clone();
@@ -367,7 +368,7 @@ impl TunnelRuntime for LinuxTunnelRuntime {
     }
 
     async fn transit_status(&self) -> (String, bool) {
-        if !self.settings.read().await.warp.enabled {
+        if !self.settings.read().await.warp().enabled {
             return (String::new(), false);
         }
         let Some(svc) = &self.warp else {

@@ -130,11 +130,7 @@ async fn main() -> Result<()> {
     }
 
     let settings = Arc::new(RwLock::new(settings));
-    let warp = Arc::new(warp_runtime::WarpService::load(
-        &dir,
-        tag.clone(),
-        settings.clone(),
-    )?);
+    let warp = warp_runtime::WarpService::load(&dir, tag.clone(), settings.clone())?;
     let listen_addr = settings.read().await.listen_addr.clone();
     let web_port = settings.read().await.port;
     let jobs = jobs::JobStore::new();

@@ -70,7 +70,7 @@ impl WarpService {
     }
 
     async fn register(&self, slot: usize, version: &str) -> Result<WarpAccount> {
-        let (priv_key, pub_key) = warp_logic::new_warp_keys()?;
+        let (priv_key, pub_key) = crate::warp_logic::new_warp_keys()?;
         let req = new_warp_reg_request(&pub_key, version)?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(25))
@@ -174,7 +174,7 @@ impl WarpService {
             run_warp(ns, &c, &a.priv_key).await?;
         }
         let ips = warp_gate_ips(&node.config, &node.ip);
-        for c in warp_logic::warp_gate_pin_cmds(&a.dev_name(&self.tag), &ips) {
+        for c in crate::warp_logic::warp_gate_pin_cmds(&a.dev_name(&self.tag), &ips) {
             run_warp(ns, &c, "").await?;
         }
         Ok(a)
@@ -204,11 +204,11 @@ impl WarpService {
                 "show".into(),
             ],
         )?;
-        let state = warp_logic::parse_warp_routes(
+        let state = crate::warp_logic::parse_warp_routes(
             &String::from_utf8_lossy(&out.stdout),
             &a.dev_name(&self.tag),
         );
-        if !warp_logic::warp_guard_needed(&state) {
+        if !crate::warp_logic::warp_guard_needed(&state) {
             return Ok(false);
         }
         for c in warp_guard_cmds(
@@ -240,11 +240,18 @@ impl WarpService {
             "dump".into(),
         ];
         let Ok(out) = output_command("ip", &args) else {
-            return (a.endpoint, false);
+            return (a.endpoint.clone(), false);
         };
         let peers = parse_wg_dump(&String::from_utf8_lossy(&out.stdout));
         let (ep, live) = warp_live_endpoint(&peers, proc_uptime(), chrono::Utc::now().timestamp());
-        (if ep.is_empty() { a.endpoint } else { ep }, live)
+        (
+            if ep.is_empty() {
+                a.endpoint.clone()
+            } else {
+                ep
+            },
+            live,
+        )
     }
 
     pub async fn wait(&self, ns: &Netns, slot: usize, timeout: Duration) -> bool {
@@ -263,7 +270,7 @@ impl WarpService {
     pub async fn overview(&self) -> WarpOverview {
         let settings = self.settings.read().await.clone();
         let accounts = self.all().await;
-        let ready = warp_logic::wireguard_install_plan(
+        let ready = crate::warp_logic::wireguard_install_plan(
             &std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
             |_| true,
         )

@@ -374,7 +374,7 @@ async fn request_failures_use_expected_reply_codes() {
         assert_eq!(&response[..2], &[5, AUTH_NONE]);
         assert_eq!(response[2], 5);
         assert_eq!(response[3], code);
-        assert_eq!(&response[4..], &[0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&response[4..], &[0, ATYP_IPV4, 0, 0, 0, 0, 0, 0]);
         assert_eq!(result.unwrap_err().to_string(), error);
     }
 }

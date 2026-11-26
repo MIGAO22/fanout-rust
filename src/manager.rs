@@ -13,7 +13,7 @@ use crate::{
     jobs::{JobHandle, JobStore},
     models::{Exit, Node, PersistedTunnel, RegionStat, SocksCred, TunnelState, MAX_EXITS},
     nodecache::NodeCache,
-    nodes::{country_label, new_socks_cred, node_label, order_candidates},
+    nodes::{country_label, fetch_nodes_via_socks, new_socks_cred, node_label, order_candidates},
     panel::Panel,
     pool_service::PoolService,
     runtime::{TunnelFactory, TunnelRuntime},
@@ -229,16 +229,51 @@ impl Manager {
 
     pub async fn refresh_nodes(&self) -> Result<usize> {
         let s = self.settings().await;
-        self.nodes
+        if let Ok(count) = self
+            .nodes
             .refresh(&s.conn.score_mode, s.residential_only())
             .await
+        {
+            return Ok(count);
+        }
+        self.refresh_nodes_via_proxies(&s).await
     }
 
     pub async fn ensure_nodes(&self) -> Result<usize> {
         let s = self.settings().await;
-        self.nodes
+        if let Ok(count) = self
+            .nodes
             .ensure(s.conn.node_ttl, &s.conn.score_mode, s.residential_only())
             .await
+        {
+            return Ok(count);
+        }
+        self.refresh_nodes_via_proxies(&s).await
+    }
+
+    async fn refresh_nodes_via_proxies(&self, settings: &WebSettings) -> Result<usize> {
+        let mut last_error = None;
+        for tunnel in self.tunnels().await {
+            if tunnel.status().await != "up" {
+                continue;
+            }
+            let cred = tunnel.cred.read().await.clone();
+            let proxy = format!(
+                "socks5h://{}:{}@127.0.0.1:{}",
+                cred.user, cred.pass, tunnel.port
+            );
+            match fetch_nodes_via_socks(&proxy, Duration::from_secs(25), &settings.conn.score_mode)
+                .await
+            {
+                Ok(nodes) => {
+                    let count = nodes.len();
+                    self.nodes.replace(nodes).await;
+                    return Ok(count);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow!("没有在线出口可用于拉取节点列表")))
     }
 
     pub async fn node_list(&self, all: bool) -> (Vec<Node>, bool) {

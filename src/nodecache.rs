@@ -69,6 +69,12 @@ impl NodeCache {
         Ok(selectable_nodes(&s.nodes, residential_only).len())
     }
 
+    pub async fn replace(&self, nodes: Vec<Node>) {
+        let mut state = self.inner.lock().await;
+        state.nodes = nodes;
+        state.fetched_at = Some(std::time::Instant::now());
+    }
+
     pub async fn refresh(&self, score_mode: &str, residential_only: bool) -> Result<usize> {
         {
             let mut s = self.inner.lock().await;

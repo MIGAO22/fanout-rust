@@ -85,7 +85,7 @@ pub async fn fetch_nodes_from(
     }
     let resp = req.send().await.context("拉取节点列表失败")?;
     if resp.status() == StatusCode::TOO_MANY_REQUESTS {
-        return fetch_nodes_from_curl(url, key, timeout, score_mode).await;
+        return fetch_nodes_from_curl(url, key, timeout, score_mode, None).await;
     }
     if resp.status() != StatusCode::OK {
         anyhow::bail!("拉取节点列表失败: HTTP {}", resp.status().as_u16());
@@ -99,9 +99,11 @@ async fn fetch_nodes_from_curl(
     key: &str,
     timeout: Duration,
     score_mode: &str,
+    proxy: Option<&str>,
 ) -> Result<Vec<Node>> {
     let url = url.to_string();
     let key = key.to_string();
+    let proxy = proxy.map(str::to_string);
     let secs = timeout.as_secs().clamp(5, 120).to_string();
     let body = tokio::task::spawn_blocking(move || {
         let mut command = Command::new("curl");
@@ -114,6 +116,9 @@ async fn fetch_nodes_from_curl(
         ]);
         if !key.is_empty() {
             command.arg("-H").arg(format!("X-Fanout-Key: {key}"));
+        }
+        if let Some(proxy) = proxy {
+            command.arg("--proxy").arg(proxy);
         }
         command.arg(url);
         let output = command.output().context("curl 拉取节点列表失败")?;
@@ -128,6 +133,14 @@ async fn fetch_nodes_from_curl(
     .await
     .context("curl 节点拉取任务异常退出")??;
     parse_node_csv(&body, score_mode)
+}
+
+pub async fn fetch_nodes_via_socks(
+    proxy: &str,
+    timeout: Duration,
+    score_mode: &str,
+) -> Result<Vec<Node>> {
+    fetch_nodes_from_curl(VPNGATE_API, "", timeout, score_mode, Some(proxy)).await
 }
 
 pub fn parse_node_csv(body: &str, score_mode: &str) -> Result<Vec<Node>> {

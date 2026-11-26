@@ -9,6 +9,10 @@ use rust_embed::RustEmbed;
 #[folder = "web/"]
 pub struct Assets;
 
+fn versioned_index(html: &str, version: &str) -> String {
+    html.replace("src=\"app.js\"", &format!("src=\"app.js?v={version}\""))
+}
+
 pub async fn index() -> Response {
     match Assets::get("index.html") {
         Some(f) => (
@@ -16,7 +20,7 @@ pub async fn index() -> Response {
                 (header::CONTENT_TYPE, "text/html; charset=utf-8"),
                 (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
             ],
-            f.data.into_owned(),
+            versioned_index(&String::from_utf8_lossy(&f.data), env!("CARGO_PKG_VERSION")),
         )
             .into_response(),
         None => (StatusCode::INTERNAL_SERVER_ERROR, "index.html missing").into_response(),
@@ -40,7 +44,7 @@ pub async fn login_page() -> Response {
 pub async fn asset(Path(path): Path<String>) -> Response {
     let path = path.trim_start_matches('/');
     if path.contains("..") {
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+        return (StatusCode::NOT_FOUND, "not found");
     }
     match Assets::get(path) {
         Some(f) => {
@@ -64,6 +68,18 @@ pub async fn asset(Path(path): Path<String>) -> Response {
             )
                 .into_response()
         }
-        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+        None => (StatusCode::NOT_FOUND, "not found"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_uses_versioned_script_url() {
+        let html = versioned_index("<script src=\"app.js\"></script>", "0.0.6");
+        assert!(html.contains("app.js?v=0.0.6"));
+        assert!(!html.contains("src=\"app.js\""));
     }
 }

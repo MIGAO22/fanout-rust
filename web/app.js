@@ -1536,6 +1536,8 @@ function renderDetail(d){
       : '<div class="errbox" style="background:var(--accent-soft);border-color:var(--accent-ring);color:var(--text-2)">'
         + '<b style="color:var(--accent)">由 xray-cf-lite 托管</b>'
         + '端口、UUID 和分享链接都去 xray-cf-lite 那边改。这里只决定它走哪条出口。</div>');
+  const bind = $('#dbind');
+  if(bind) bind.value = boundValue(d.bound_to);
   refreshDetailOwner();
 }
 

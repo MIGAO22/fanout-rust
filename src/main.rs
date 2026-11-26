@@ -239,10 +239,10 @@ async fn main() -> Result<()> {
     } else {
         let canonical = format!("/{basepath}");
         let trailing = format!("{canonical}/");
-        Router::new().nest(&canonical, app).route(
-            &trailing,
+        Router::new().nest(&trailing, app).route(
+            &canonical,
             get(move || {
-                let target = canonical.clone();
+                let target = trailing.clone();
                 async move { axum::response::Redirect::permanent(&target) }
             }),
         )

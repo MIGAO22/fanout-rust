@@ -44,7 +44,7 @@ pub async fn login_page() -> Response {
 pub async fn asset(Path(path): Path<String>) -> Response {
     let path = path.trim_start_matches('/');
     if path.contains("..") {
-        return (StatusCode::NOT_FOUND, "not found");
+        return (StatusCode::NOT_FOUND, "not found").into_response();
     }
     match Assets::get(path) {
         Some(f) => {
@@ -68,7 +68,7 @@ pub async fn asset(Path(path): Path<String>) -> Response {
             )
                 .into_response()
         }
-        None => (StatusCode::NOT_FOUND, "not found"),
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
 

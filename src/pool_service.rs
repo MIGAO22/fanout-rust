@@ -1220,8 +1220,12 @@ async fn accept_loop(
                             error.kind(),
                             std::io::ErrorKind::ConnectionAborted
                                 | std::io::ErrorKind::Interrupted
+                                | std::io::ErrorKind::WouldBlock
                         ) => continue,
-                    Err(_) => break,
+                    Err(error) => {
+                        warn!("出口组 {id} 接受连接失败，稍后重试: {error}");
+                        sleep(Duration::from_millis(100)).await;
+                    }
                 };
                 // Missing pools must be dropped, not served with AUTH_NONE.
                 let Some(cred) = service.cred_of(&id) else {

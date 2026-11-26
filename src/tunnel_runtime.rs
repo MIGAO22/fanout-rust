@@ -13,6 +13,7 @@ use std::{
 use tokio::{
     net::TcpListener,
     sync::{Mutex, RwLock},
+    time::sleep,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -170,6 +171,7 @@ impl LinuxTunnelRuntime {
         let accepting = Arc::new(AtomicBool::new(true));
         self.accepting.store(true, Ordering::Release);
         let stop = self.stop.lock().await.clone();
+        let port = self.port;
         tokio::spawn(async move {
             loop {
                 if !accepting.load(Ordering::Acquire) {
@@ -177,10 +179,24 @@ impl LinuxTunnelRuntime {
                 }
                 tokio::select! {
                     accepted = listener.accept() => {
-                        let Ok((stream, _)) = accepted else { break; };
-                        let c = cred.read().await.clone();
-                        let d = dialer.clone();
-                        tokio::spawn(async move { let _ = serve_socks(stream, Some(&c), d.as_ref()).await; });
+                        match accepted {
+                            Ok((stream, _)) => {
+                                let c = cred.read().await.clone();
+                                let d = dialer.clone();
+                                tokio::spawn(async move { let _ = serve_socks(stream, Some(&c), d.as_ref()).await; });
+                            }
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::ConnectionAborted
+                                        | std::io::ErrorKind::Interrupted
+                                        | std::io::ErrorKind::WouldBlock
+                                ) => continue,
+                            Err(error) => {
+                                tracing::warn!("SOCKS5 {port} 接受连接失败，稍后重试: {error}");
+                                sleep(Duration::from_millis(100)).await;
+                            }
+                        }
                     }
                     _ = stop.cancelled() => break,
                 }

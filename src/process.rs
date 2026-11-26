@@ -18,7 +18,7 @@ use tokio::{
 };
 
 #[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
+use std::os::{fd::AsRawFd, unix::fs::MetadataExt};
 
 /// The namespace captured at fanout startup. Commands and newly spawned
 /// processes must start here, never in a namespace borrowed by a dialer.
@@ -69,6 +69,18 @@ where
         let Some(main) = captured_main_netns()? else {
             return function();
         };
+        if let Ok(current) = File::open("/proc/thread-self/ns/net") {
+            let same = current
+                .metadata()
+                .ok()
+                .zip(main.metadata().ok())
+                .is_some_and(|(current, main)| {
+                    current.dev() == main.dev() && current.ino() == main.ino()
+                });
+            if same {
+                return function();
+            }
+        }
 
         let (sender, receiver) = mpsc::channel::<Result<T>>();
         thread::scope(|scope| {
@@ -550,6 +562,13 @@ pub fn openvpn_paths(work_dir: &Path, namespace: &str) -> (PathBuf, PathBuf, Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_namespace_fast_path_executes_in_current_thread() {
+        init_main_netns().unwrap();
+        assert_eq!(in_main_netns(|| Ok(7_u8)).unwrap(), 7);
+    }
 
     #[test]
     fn command_error_keeps_program_status_and_output() {

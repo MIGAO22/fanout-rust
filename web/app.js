@@ -1438,7 +1438,11 @@ function refreshDetailOwner(){
   if(!curDetail) return;
   const el = $('#downer');
   if(!el) return;
-  el.innerHTML = ownerBadge(ownerOf(curDetail.id));
+  const bound = curDetail.bound_to || '';
+  const pool = bound ? (view.pools || []).find(p => p.identity === bound) : null;
+  const exit = bound ? (view.exits || []).find(e => e.host === bound) : null;
+  const owner = pool ? {kind:'pool', ref:pool} : (exit ? {kind:'exit', ref:exit} : null);
+  el.innerHTML = ownerBadge(owner);
 }
 
 // 出口下拉：列出所有已连通的隧道，外加「直连」。绑定按 Xray 的 inboundTag 走。
@@ -1491,7 +1495,7 @@ function renderDetail(d){
       '<dl class="kvs">'
     + '<dt>当前出口</dt><dd><span id="downer"></span></dd>'
     + '<dt>改绑到</dt><dd><select class="inp" id="dbind" data-tag="' + esc(d.tag) + '" '
-    +   'style="max-width:280px;height:29px;font-size:12.5px">' + exitOptions(curBound(owner)) + '</select></dd>'
+    +   'style="max-width:280px;height:29px;font-size:12.5px">' + exitOptions(d.bound_to || '') + '</select></dd>'
     + '<dt>协议</dt><dd>' + tlsLine + '</dd>'
     + '<dt>监听</dt><dd>' + esc(d.listen || '0.0.0.0') + '</dd>'
     + '<dt>inboundTag</dt><dd>' + esc(d.tag) + '</dd>'
@@ -1545,8 +1549,8 @@ document.addEventListener('change', async e => {
     await api('/api/xui/bind?tag=' + encodeURIComponent(sel.dataset.tag)
       + '&host=' + encodeURIComponent(sel.value), {method:'POST'});
     toast(sel.value ? '已绑定' : '已解绑回直连', 'ok');
+    await poll();
     await openDetail(curDetail.id);
-    poll();
   }catch(err){ toast(err.message, 'bad'); }
   sel.disabled = false;
 });

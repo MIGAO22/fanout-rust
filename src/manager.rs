@@ -398,7 +398,15 @@ impl Manager {
             .into_iter()
             .find(|node| node.hostname != old_host)
         {
+            tracing::info!(
+                "隧道 {} WARP 超时，换节点 {} -> {}",
+                t.slot,
+                old_host,
+                next.hostname
+            );
             t.set_node(next).await;
+        } else {
+            tracing::warn!("隧道 {} WARP 超时，但没有其它候选节点", t.slot);
         }
         self.persist().await.ok();
         let m = self.clone();

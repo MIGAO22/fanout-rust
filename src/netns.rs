@@ -419,6 +419,7 @@ impl NetnsDialer {
         let budget = self.timeout;
         let namespace = self.namespace.clone();
         let host = host.to_string();
+        let lookup_host = host.clone();
         let output = timeout(
             budget,
             tokio::task::spawn_blocking(move || {
@@ -430,7 +431,7 @@ impl NetnsDialer {
                         namespace,
                         "getent".into(),
                         "ahostsv4".into(),
-                        host.clone(),
+                        lookup_host,
                     ],
                 )
             }),

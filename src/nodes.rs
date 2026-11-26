@@ -5,7 +5,10 @@ use ipnet::Ipv4Net;
 use rand::Rng;
 use reqwest::{header::HeaderValue, Client, StatusCode};
 use serde_json::{json, Value};
-use std::{collections::HashMap, net::IpAddr, num::IntErrorKind, str::FromStr, time::Duration};
+use std::{
+    collections::HashMap, net::IpAddr, num::IntErrorKind, process::Command, str::FromStr,
+    time::Duration,
+};
 
 use crate::models::{Node, SocksCred};
 
@@ -73,6 +76,7 @@ pub async fn fetch_nodes_from(
         builder = builder.timeout(timeout);
     }
     let client = builder
+        .user_agent("fanout-rust/0.0.17")
         .build()
         .context("拉取节点列表失败: 创建 HTTP 客户端失败")?;
     let mut req = client.get(url);
@@ -80,11 +84,50 @@ pub async fn fetch_nodes_from(
         req = req.header("X-Fanout-Key", HeaderValue::from_str(key)?);
     }
     let resp = req.send().await.context("拉取节点列表失败")?;
+    if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+        return fetch_nodes_from_curl(url, key, timeout, score_mode).await;
+    }
     if resp.status() != StatusCode::OK {
         anyhow::bail!("拉取节点列表失败: HTTP {}", resp.status().as_u16());
     }
     let raw = resp.bytes().await.context("读取节点列表失败")?;
     parse_node_csv(&String::from_utf8_lossy(&raw), score_mode)
+}
+
+async fn fetch_nodes_from_curl(
+    url: &str,
+    key: &str,
+    timeout: Duration,
+    score_mode: &str,
+) -> Result<Vec<Node>> {
+    let url = url.to_string();
+    let key = key.to_string();
+    let secs = timeout.as_secs().clamp(5, 120).to_string();
+    let body = tokio::task::spawn_blocking(move || {
+        let mut command = Command::new("curl");
+        command.args([
+            "-fsSL".to_string(),
+            "--connect-timeout".to_string(),
+            "5".to_string(),
+            "--max-time".to_string(),
+            secs,
+        ]);
+        if !key.is_empty() {
+            command.arg("-H").arg(format!("X-Fanout-Key: {key}"));
+        }
+        command.arg(url);
+        let output = command.output().context("curl 拉取节点列表失败")?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "curl 拉取节点列表失败: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok::<String, anyhow::Error>(String::from_utf8_lossy(&output.stdout).into_owned())
+    })
+    .await
+    .context("curl 节点拉取任务异常退出")??;
+    parse_node_csv(&body, score_mode)
 }
 
 pub fn parse_node_csv(body: &str, score_mode: &str) -> Result<Vec<Node>> {

@@ -1221,6 +1221,16 @@ html[data-theme="dark"] .scr{background:rgba(0,0,0,.62)}
               </div>
               <div class="frow">
                 <div class="field">
+                  <label>WARP 握手超时（分钟）</label>
+                  <input class="inp mono" id="setWarpHandshakeTimeout" type="text" inputmode="numeric">
+                </div>
+                <div class="field">
+                  <label>超时后处理</label>
+                  <div class="hint" style="margin-top:8px">自动清除该出口的 WARP 注册与隧道，换新节点补位并持续重试，直到握手成功。</div>
+                </div>
+              </div>
+              <div class="frow">
+                <div class="field">
                   <label>重连退避下限（秒）</label>
                   <input class="inp mono" id="setBackoffMin" type="text" inputmode="numeric">
                 </div>

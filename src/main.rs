@@ -166,17 +166,19 @@ async fn main() -> Result<()> {
         manager: manager.clone(),
         dir: dir.clone(),
         basepath: basepath.clone(),
-        warp,
+        warp: warp.clone(),
         panel: panels.clone(),
-        pools,
+        pools: pools.clone(),
     });
     if let Err(e) = manager.restore().await {
         tracing::warn!("恢复隧道状态失败: {e}");
     }
     state.pools.start_fill_task();
     let health_manager = manager.clone();
+    let health_warp = warp.clone();
+    let health_pools = pools.clone();
     tokio::spawn(async move {
-        health_manager.health_loop().await;
+        health_manager.health_loop(health_warp, health_pools).await;
     });
     if !tag.is_empty() {
         tracing::info!("非默认工作目录，本实例用 netns fo{tag}*");

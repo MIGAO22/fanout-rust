@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
@@ -15,9 +15,11 @@ use crate::{
     nodecache::NodeCache,
     nodes::{country_label, new_socks_cred, node_label, order_candidates},
     panel::Panel,
+    pool_service::PoolService,
     runtime::{TunnelFactory, TunnelRuntime},
     state::{load_state, save_state, StateFile},
     util::{one_line, random_token},
+    warp_runtime::WarpService,
 };
 
 pub struct TunnelInner {
@@ -367,6 +369,44 @@ impl Manager {
             if t.status().await == "up" && t.host().await != old_host {
                 if let Some(p) = m.panel.get() {
                     let _ = p.rebind(&old_host, &t.host().await).await;
+                }
+            }
+            let _ = p_resync(&m, &t).await;
+        });
+    }
+
+    pub async fn replace_warp_failed(
+        &self,
+        t: Arc<Tunnel>,
+        old_host: String,
+        warp: Arc<WarpService>,
+        pools: Arc<PoolService>,
+    ) {
+        t.set_status("starting", "WARP 握手超时，正在清除并更换出口")
+            .await;
+        {
+            let mut i = t.inner.lock().await;
+            i.exit_ip.clear();
+            i.prev_host = Some(old_host.clone());
+            if !i.avoid.contains(&old_host) {
+                i.avoid.push(old_host.clone());
+            }
+        }
+        self.persist().await.ok();
+        let m = self.clone();
+        tokio::spawn(async move {
+            let _ = t.runtime.stop().await;
+            if let Err(err) = warp.remove(t.slot).await {
+                tracing::warn!("清理隧道 {} 的 WARP 注册失败: {err}", t.slot);
+            }
+            m.bring_up(t.clone(), false, true).await;
+            if t.status().await == "up" && t.host().await != old_host {
+                let new_host = t.host().await;
+                if let Err(err) = pools.rename_host(&old_host, &new_host).await {
+                    tracing::warn!("更新出口组成员 {} -> {} 失败: {err}", old_host, new_host);
+                }
+                if let Some(p) = m.panel.get() {
+                    let _ = p.rebind(&old_host, &new_host).await;
                 }
             }
             let _ = p_resync(&m, &t).await;
@@ -729,16 +769,19 @@ impl Manager {
         }
     }
 
-    pub async fn health_loop(self: Arc<Self>) {
+    pub async fn health_loop(self: Arc<Self>, warp: Arc<WarpService>, pools: Arc<PoolService>) {
         let mut fails: HashMap<usize, u32> = HashMap::new();
+        let mut warp_fail_since: HashMap<usize, Instant> = HashMap::new();
         loop {
             let s = self.settings().await;
             tokio::time::sleep(Duration::from_secs(s.conn.health_interval)).await;
+            let warp_enabled = s.warp().enabled;
             let tunnels = self.tunnels().await;
             let sem = Arc::new(Semaphore::new(8));
             let mut tasks = Vec::new();
             for t in tunnels {
                 if t.status().await != "up" {
+                    warp_fail_since.remove(&t.slot);
                     continue;
                 }
                 let sem = sem.clone();
@@ -747,8 +790,14 @@ impl Manager {
                     if let Err(e) = t.runtime.guard_transit().await {
                         tracing::warn!("隧道 {} 中转路由对齐失败: {e}", t.slot);
                     }
+                    if warp_enabled {
+                        let (_, live) = t.runtime.transit_status().await;
+                        if !live {
+                            return (t, false, "WARP 尚未握手".to_string(), false, true);
+                        }
+                    }
                     if let Some(why) = t.runtime.dead_reason() {
-                        return (t, false, why, true);
+                        return (t, false, why, true, false);
                     }
                     match t.runtime.probe_exit_ip().await {
                         Ok(ip) => {
@@ -763,15 +812,27 @@ impl Manager {
                                     format!("出口变成 {ip}")
                                 },
                                 false,
+                                false,
                             )
                         }
-                        Err(e) => (t, false, e.to_string(), false),
+                        Err(e) => (t, false, e.to_string(), false, false),
                     }
                 }));
             }
             let mut down = Vec::new();
             for task in tasks {
-                if let Ok((t, ok, why, certain)) = task.await {
+                if let Ok((t, ok, why, certain, warp_pending)) = task.await {
+                    if warp_pending {
+                        let since = warp_fail_since.entry(t.slot).or_insert_with(Instant::now);
+                        let timeout =
+                            Duration::from_secs(s.conn.warp_handshake_timeout.saturating_mul(60));
+                        if since.elapsed() >= timeout {
+                            warp_fail_since.remove(&t.slot);
+                            down.push((t, why, true));
+                        }
+                        continue;
+                    }
+                    warp_fail_since.remove(&t.slot);
                     if ok {
                         fails.insert(t.slot, 0);
                         continue;
@@ -780,14 +841,19 @@ impl Manager {
                     *n += 1;
                     if certain || *n >= s.conn.health_failures {
                         fails.insert(t.slot, 0);
-                        down.push((t, why));
+                        down.push((t, why, false));
                     }
                 }
             }
-            for (t, why) in down.into_iter().take(s.conn.reconnect_limit) {
+            for (t, why, warp_timeout) in down.into_iter().take(s.conn.reconnect_limit) {
                 tracing::info!("隧道 {} 已掉线：{}", t.slot, why);
                 let old = t.host().await;
-                self.reconnect(t, old).await;
+                if warp_timeout {
+                    self.replace_warp_failed(t, old, warp.clone(), pools.clone())
+                        .await;
+                } else {
+                    self.reconnect(t, old).await;
+                }
             }
         }
     }

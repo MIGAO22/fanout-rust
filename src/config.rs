@@ -13,6 +13,7 @@ pub const DEFAULT_MAX_TRIES: usize = 6;
 pub const DEFAULT_PANEL_DEBOUNCE: u64 = 1500;
 pub const DEFAULT_NODE_TTL: u64 = 600;
 pub const DEFAULT_RECONNECT_LIMIT: usize = 2;
+pub const DEFAULT_WARP_HANDSHAKE_TIMEOUT: u64 = 5;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WebSettings {
@@ -66,6 +67,8 @@ pub struct ConnSettings {
     pub score_mode: String,
     #[serde(default)]
     pub reconnect_limit: usize,
+    #[serde(default)]
+    pub warp_handshake_timeout: u64,
     #[serde(default)]
     pub aead_only: bool,
 }
@@ -128,6 +131,11 @@ impl WebSettings {
         } else {
             c.reconnect_limit.clamp(1, 50)
         };
+        c.warp_handshake_timeout = if c.warp_handshake_timeout == 0 {
+            DEFAULT_WARP_HANDSHAKE_TIMEOUT
+        } else {
+            c.warp_handshake_timeout.clamp(1, 60)
+        };
         if !matches!(
             c.score_mode.as_str(),
             "balanced" | "speed" | "idle" | "ping"
@@ -164,6 +172,7 @@ impl ConnSettings {
             node_ttl: DEFAULT_NODE_TTL,
             score_mode: "balanced".into(),
             reconnect_limit: DEFAULT_RECONNECT_LIMIT,
+            warp_handshake_timeout: DEFAULT_WARP_HANDSHAKE_TIMEOUT,
             aead_only: false,
         }
     }

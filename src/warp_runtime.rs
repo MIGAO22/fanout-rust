@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
-use std::{path::Path, process::Stdio, sync::Arc, time::Duration};
+use futures::StreamExt;
+use std::{collections::HashMap, path::Path, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     io::AsyncWriteExt,
     sync::{Mutex, RwLock, Semaphore},
@@ -24,13 +25,16 @@ use crate::{
 
 const WARP_API_VER: &str = "v0a2317";
 const WARP_CLIENT_VERSION: &str = "2026.8.2115.0";
+const WARP_REGISTER_CONCURRENCY: usize = 4;
 
 pub struct WarpService {
     dir: std::path::PathBuf,
     instance: Instance,
     settings: Arc<RwLock<WebSettings>>,
     accounts: Arc<Mutex<Vec<WarpAccount>>>,
+    slot_locks: Arc<Mutex<HashMap<usize, Arc<Mutex<()>>>>>,
     lock: Arc<Semaphore>,
+    client: reqwest::Client,
 }
 
 impl WarpService {
@@ -45,12 +49,17 @@ impl WarpService {
         } else {
             parse_warp_store(&blob)?
         };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(25))
+            .build()?;
         Ok(Arc::new(Self {
             dir: dir.to_path_buf(),
             instance,
             settings,
             accounts: Arc::new(Mutex::new(accounts)),
-            lock: Arc::new(Semaphore::new(1)),
+            slot_locks: Arc::new(Mutex::new(HashMap::new())),
+            lock: Arc::new(Semaphore::new(WARP_REGISTER_CONCURRENCY)),
+            client,
         }))
     }
 
@@ -78,10 +87,8 @@ impl WarpService {
     async fn register(&self, slot: usize, version: &str) -> Result<WarpAccount> {
         let (priv_key, pub_key) = crate::warp_logic::new_warp_keys()?;
         let req = new_warp_reg_request(&pub_key, version)?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(25))
-            .build()?;
-        let resp = client
+        let resp = self
+            .client
             .post(format!(
                 "https://api.cloudflareclient.com/{WARP_API_VER}/reg"
             ))
@@ -101,27 +108,48 @@ impl WarpService {
         )
     }
 
+    async fn slot_lock(&self, slot: usize) -> Arc<Mutex<()>> {
+        let mut locks = self.slot_locks.lock().await;
+        locks
+            .entry(slot)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
     pub async fn ensure(&self, slot: usize, version: &str) -> Result<WarpAccount> {
+        let slot_lock = self.slot_lock(slot).await;
+        let _slot_guard = slot_lock.lock().await;
         let _permit = self
             .lock
             .acquire()
             .await
             .map_err(|_| anyhow::anyhow!("WARP 服务已关闭"))?;
-        let mut accounts = self.accounts.lock().await;
-        if let Some(a) = accounts.iter().find(|a| a.slot == slot) {
+        let existing = {
+            let accounts = self.accounts.lock().await;
+            accounts.iter().find(|a| a.slot == slot).cloned()
+        };
+        if let Some(a) = existing {
             if a.version == version {
-                return Ok(a.clone());
+                return Ok(a);
             }
-            unregister(a).await;
-            accounts.retain(|a| a.slot != slot);
+            unregister(&self.client, &a).await;
+            self.accounts.lock().await.retain(|a| a.slot != slot);
         }
         let a = self.register(slot, version).await?;
+        let mut accounts = self.accounts.lock().await;
+        if let Some(current) = accounts.iter().find(|a| a.slot == slot) {
+            if current.version == version {
+                return Ok(current.clone());
+            }
+        }
         accounts.push(a.clone());
         self.save(&accounts).await?;
         Ok(a)
     }
 
-    pub async fn drop(&self, slot: usize) -> Result<()> {
+    pub async fn remove(&self, slot: usize) -> Result<()> {
+        let slot_lock = self.slot_lock(slot).await;
+        let _slot_guard = slot_lock.lock().await;
         let _permit = self
             .lock
             .acquire()
@@ -129,7 +157,7 @@ impl WarpService {
             .map_err(|_| anyhow::anyhow!("WARP 服务已关闭"))?;
         let mut accounts = self.accounts.lock().await;
         if let Some(a) = accounts.iter().find(|a| a.slot == slot) {
-            unregister(a).await;
+            unregister(&self.client, a).await;
         }
         accounts.retain(|a| a.slot != slot);
         self.save(&accounts).await
@@ -143,7 +171,7 @@ impl WarpService {
             .map_err(|_| anyhow::anyhow!("WARP 服务已关闭"))?;
         let mut accounts = self.accounts.lock().await;
         for a in accounts.iter() {
-            unregister(a).await;
+            unregister(&self.client, a).await;
         }
         accounts.clear();
         self.save(&accounts).await
@@ -158,10 +186,23 @@ impl WarpService {
         let a = self.ensure(ns.slot, &version).await?;
         let mtu = warp_path_mtu(true, 1500).0;
         let mut direct = vec!["8.8.8.8".to_string()];
-        for host in warp_gate_names(&node.config) {
-            if let Ok(addrs) = tokio::net::lookup_host((host.as_str(), 0)).await {
-                for addr in addrs.filter(|a| matches!(a, std::net::SocketAddr::V4(_))) {
-                    direct.push(addr.ip().to_string());
+        let lookups = futures::future::join_all(warp_gate_names(&node.config).into_iter().map(
+            |host| async move {
+                let addrs = tokio::net::lookup_host((host.as_str(), 0)).await?;
+                Ok::<Vec<std::net::SocketAddr>, std::io::Error>(addrs.collect())
+            },
+        ))
+        .await;
+        for result in lookups {
+            if let Ok(addrs) = result {
+                for addr in addrs
+                    .into_iter()
+                    .filter(|a| matches!(a, std::net::SocketAddr::V4(_)))
+                {
+                    let ip = addr.ip().to_string();
+                    if !direct.contains(&ip) {
+                        direct.push(ip);
+                    }
                 }
             }
         }
@@ -176,23 +217,56 @@ impl WarpService {
             veth: ns.peer(),
             direct_ips: direct,
         });
-        for c in cmds {
-            run_warp(ns, &c, &a.priv_key).await?;
+        let private_key = Arc::new(a.priv_key.clone());
+        let mut routes = Vec::new();
+        let mut ordered = Vec::new();
+        for command in cmds {
+            if command.first().map(String::as_str) == Some("ip")
+                && command.get(1).map(String::as_str) == Some("route")
+            {
+                routes.push(command);
+            } else {
+                ordered.push(command);
+            }
+        }
+        for result in futures::future::join_all(routes.into_iter().map(|command| {
+            let private_key = private_key.clone();
+            async move { run_warp(ns, &command, &private_key).await }
+        }))
+        .await
+        {
+            result?;
+        }
+        for command in ordered {
+            run_warp(ns, &command, &private_key).await?;
         }
         let ips = warp_gate_ips(&node.config, &node.ip);
-        for c in crate::warp_logic::warp_gate_pin_cmds(&a.dev_name(&self.instance.tag), &ips) {
-            run_warp(ns, &c, "").await?;
+        let pins = crate::warp_logic::warp_gate_pin_cmds(&a.dev_name(&self.instance.tag), &ips);
+        for result in futures::future::join_all(
+            pins.into_iter()
+                .map(|command| async move { run_warp(ns, &command, "").await }),
+        )
+        .await
+        {
+            result?;
         }
         Ok(a)
     }
 
     pub async fn split(&self, ns: &Netns, node: &Node, a: &WarpAccount) -> Result<()> {
-        for c in warp_split_cmds(
+        let commands = warp_split_cmds(
             &a.dev_name(&self.instance.tag),
             "tun0",
             &warp_gate_ips(&node.config, &node.ip),
-        ) {
-            run_warp(ns, &c, "").await?;
+        );
+        for result in futures::future::join_all(
+            commands
+                .into_iter()
+                .map(|command| async move { run_warp(ns, &command, "").await }),
+        )
+        .await
+        {
+            result?;
         }
         Ok(())
     }
@@ -217,13 +291,20 @@ impl WarpService {
         if !crate::warp_logic::warp_guard_needed(&state) {
             return Ok(false);
         }
-        for c in warp_guard_cmds(
+        let commands = warp_guard_cmds(
             &a.dev_name(&self.instance.tag),
             "tun0",
             &warp_gate_ips(&node.config, &node.ip),
             state.tun_up,
-        ) {
-            run_warp(ns, &c, "").await?;
+        );
+        for result in futures::future::join_all(
+            commands
+                .into_iter()
+                .map(|command| async move { run_warp(ns, &command, "").await }),
+        )
+        .await
+        {
+            result?;
         }
         Ok(true)
     }
@@ -269,7 +350,7 @@ impl WarpService {
             if tokio::time::Instant::now() >= deadline {
                 return false;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
@@ -286,7 +367,7 @@ impl WarpService {
             .warp()
             .client_version
             .unwrap_or_else(|| WARP_CLIENT_VERSION.into());
-        let mut at = 0;
+        let at = 0;
         if !crate::clients::has_cmd("wg") {
             job.set(at, "running", "正在安装 wireguard-tools").await;
             let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
@@ -311,34 +392,38 @@ impl WarpService {
                 }
             }
             job.set(at, "ok", "wg 已就位").await;
-            at += 1;
         }
-        for tunnel in tunnels {
-            let host = tunnel.host().await;
-            job.set(at, "running", "正在重新注册").await;
-            if let Err(err) = self.drop(tunnel.slot).await {
-                job.set(at, "failed", &err.to_string()).await;
-                at += 1;
-                continue;
-            }
-            let account = match self.ensure(tunnel.slot, &version).await {
-                Ok(account) => account,
-                Err(err) => {
-                    job.set(at, "failed", &err.to_string()).await;
-                    at += 1;
-                    continue;
+        let mut tasks =
+            futures::stream::iter(tunnels.into_iter().enumerate().map(|(at, tunnel)| {
+                let job = job.clone();
+                let version = version.clone();
+                async move {
+                    let host = tunnel.host().await;
+                    job.set(at, "running", "正在重新注册").await;
+                    if let Err(err) = self.remove(tunnel.slot).await {
+                        job.set(at, "failed", &err.to_string()).await;
+                        return;
+                    }
+                    let account = match self.ensure(tunnel.slot, &version).await {
+                        Ok(account) => account,
+                        Err(err) => {
+                            job.set(at, "failed", &err.to_string()).await;
+                            return;
+                        }
+                    };
+                    manager.reconnect(tunnel.clone(), host).await;
+                    let ns = Netns::new(self.instance.clone(), tunnel.slot);
+                    if self.wait(&ns, tunnel.slot, Duration::from_secs(120)).await {
+                        job.set(at, "ok", &format!("Cloudflare 接入 {}", account.endpoint))
+                            .await;
+                    } else {
+                        job.set(at, "failed", "WARP 握手超时").await;
+                    }
                 }
-            };
-            manager.reconnect(tunnel.clone(), host).await;
-            let ns = Netns::new(self.instance.clone(), tunnel.slot);
-            if self.wait(&ns, tunnel.slot, Duration::from_secs(120)).await {
-                job.set(at, "ok", &format!("Cloudflare 接入 {}", account.endpoint))
-                    .await;
-            } else {
-                job.set(at, "failed", "WARP 握手超时").await;
-            }
-            at += 1;
-        }
+            }))
+            .buffer_unordered(WARP_REGISTER_CONCURRENCY);
+        while futures::StreamExt::next(&mut tasks).await.is_some() {}
+        drop(tasks);
         job.finish().await;
         Ok(())
     }
@@ -386,17 +471,10 @@ impl WarpService {
     }
 }
 
-async fn unregister(a: &WarpAccount) {
+async fn unregister(client: &reqwest::Client, a: &WarpAccount) {
     if a.id.is_empty() || a.token.is_empty() {
         return;
     }
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
     let _ = client
         .delete(format!(
             "https://api.cloudflareclient.com/{WARP_API_VER}/reg/{}",

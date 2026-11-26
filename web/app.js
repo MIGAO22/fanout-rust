@@ -1821,6 +1821,7 @@ async function loadBackendModes(){
 
 const DEF = {
   health_interval:10, health_failures:3, health_timeout:6,
+  warp_handshake_timeout:5,
   backoff_min:5, backoff_max:60, connect_budget:35,
   max_tries:6, panel_debounce:1500, score_mode:'balanced', node_ttl:600,
 };
@@ -1858,6 +1859,7 @@ async function loadSettingsPage(){
     setV('#setHealthInterval', c.health_interval ?? DEF.health_interval);
     setV('#setHealthFails',     c.health_failures ?? DEF.health_failures);
     setV('#setHealthTimeout',   c.health_timeout ?? DEF.health_timeout);
+    setV('#setWarpHandshakeTimeout', c.warp_handshake_timeout ?? DEF.warp_handshake_timeout);
     setV('#setBackoffMin',      c.backoff_min ?? DEF.backoff_min);
     setV('#setBackoffMax',      c.backoff_max ?? DEF.backoff_max);
     setV('#setConnectBudget',   c.connect_budget ?? DEF.connect_budget);
@@ -2240,6 +2242,7 @@ $('#setSave').onclick = async e => {
     health_interval:  getV('#setHealthInterval', DEF.health_interval),
     health_failures:  getV('#setHealthFails', DEF.health_failures),
     health_timeout:   getV('#setHealthTimeout', DEF.health_timeout),
+    warp_handshake_timeout: getV('#setWarpHandshakeTimeout', DEF.warp_handshake_timeout),
     backoff_min:      getV('#setBackoffMin', DEF.backoff_min),
     backoff_max:      getV('#setBackoffMax', DEF.backoff_max),
     connect_budget:   getV('#setConnectBudget', DEF.connect_budget),

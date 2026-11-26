@@ -739,7 +739,8 @@ impl PoolService {
         let assessment = assess_pool_fill(pool, &members, &mut first_dead, now);
         {
             let mut state = lock_unpoisoned(&self.inner.state);
-            state.fill.merge_dead(&pool.id, first_dead, &state.store);
+            let store = state.store.clone();
+            state.fill.merge_dead(&pool.id, first_dead, &store);
         }
         if assessment.need == 0 {
             lock_unpoisoned(&self.inner.state)

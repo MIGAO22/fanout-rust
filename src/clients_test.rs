@@ -934,7 +934,7 @@ async fn source_build_job_reports_failure() {
     job.set(B_STEP_DEPS, "failed", "dependency install failed")
         .await;
     job.clone().finish().await;
-    let view = job.view().await;
+    let view = job.view().await.unwrap();
     assert_eq!(view.status, "failed");
     assert_eq!(view.steps[B_STEP_DEPS].status, "failed");
     assert_eq!(view.steps[B_STEP_DEPS].detail, "dependency install failed");

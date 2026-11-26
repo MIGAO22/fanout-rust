@@ -116,6 +116,15 @@ impl JobHandle {
         }
     }
 
+    pub async fn view(&self) -> Option<JobView> {
+        self.jobs
+            .lock()
+            .await
+            .iter()
+            .find(|job| job.id == self.id)
+            .map(Job::view)
+    }
+
     pub async fn finish(self) {
         let mut jobs = self.jobs.lock().await;
         if let Some(j) = jobs.iter_mut().find(|j| j.id == self.id) {

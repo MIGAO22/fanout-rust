@@ -229,6 +229,18 @@ pub fn load_basepath(dir: &Path) -> Result<(String, bool)> {
     }
 }
 
+pub fn save_basepath(dir: &Path, raw: &str) -> Result<String> {
+    let path = raw.trim().trim_matches('/');
+    if path
+        .chars()
+        .any(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')))
+    {
+        anyhow::bail!("访问路径只能用字母、数字、- 和 _");
+    }
+    atomic_write(dir.join("basepath"), path.as_bytes(), 0o600)?;
+    Ok(path.to_string())
+}
+
 pub fn parse_ip(s: &str) -> Option<IpAddr> {
     s.parse().ok()
 }

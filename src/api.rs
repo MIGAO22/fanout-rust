@@ -46,10 +46,15 @@ pub async fn exits(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                     .enumerate()
                     .map(|(index, exit)| (crate::panel_native::sanitize_tag(&exit.host), index))
                     .collect();
-                let by_pool: HashMap<_, _> = pools
+                let mut by_pool: HashMap<_, _> = pools
                     .iter()
                     .enumerate()
-                    .map(|(index, pool)| (crate::panel_native::sanitize_tag(&pool.identity), index))
+                    .flat_map(|(index, pool)| {
+                        [
+                            (crate::panel_native::sanitize_tag(&pool.identity), index),
+                            (crate::panel_native::egress_tag(&pool.identity), index),
+                        ]
+                    })
                     .collect();
                 for inbound in inbounds {
                     let row = ExitInbound {
@@ -266,7 +271,17 @@ pub async fn pool_save(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PoolSaveReq>,
 ) -> Response {
-    let pool = crate::models::Pool {
+    if req.auto_fill && req.size > req.hosts.len() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "要维持 {} 条可用出口，但只勾了 {} 条组员：目标条数不能超过组内出口数",
+                req.size,
+                req.hosts.len()
+            ),
+        );
+    }
+    let mut pool = crate::models::Pool {
         id: req.id,
         name: req.name,
         mode: req.mode,
@@ -277,10 +292,22 @@ pub async fn pool_save(
         auto_fill: req.auto_fill,
         size: req.size,
     };
-    match state.pools.set_pool(pool).await {
-        Ok(p) => Json(json!({"id": p.id, "name": p.name})).into_response(),
-        Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
+    if let Err(err) = state.pools.check_pool_hosts(&mut pool).await {
+        return error(StatusCode::BAD_REQUEST, err.to_string());
     }
+    let saved = match state.pools.set_pool(pool).await {
+        Ok(saved) => saved,
+        Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
+    };
+    if let Some(panel) = state.manager.panel() {
+        if let Err(err) = panel.on_tunnels_changed().await {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("组已保存，但写入节点链接后端失败：{err}"),
+            );
+        }
+    }
+    Json(json!({"id": saved.id, "name": saved.name})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -292,10 +319,49 @@ pub async fn pool_delete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PoolDeleteReq>,
 ) -> Response {
-    match state.pools.delete_pool(&req.id).await {
-        Ok(()) => Json(json!({"ok": true, "unbound": []})).into_response(),
-        Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
+    let Some(pool) = state.pools.pool(&req.id) else {
+        return error(StatusCode::BAD_REQUEST, "出口组不存在");
+    };
+    let identity = crate::panel_native::sanitize_tag(&pool.identity());
+    let egress = crate::panel_native::egress_tag(&pool.identity());
+    let current = match state
+        .panel
+        .lock_current_panel_from(&state.manager, &state.pools)
+        .await
+    {
+        Ok(current) => current,
+        Err(err) => return error(StatusCode::BAD_GATEWAY, err.to_string()),
+    };
+    let inbounds = match current.inbounds().await {
+        Ok(inbounds) => inbounds,
+        Err(err) => return error(StatusCode::BAD_GATEWAY, err.to_string()),
+    };
+    let mut unbound = Vec::new();
+    for inbound in inbounds {
+        if inbound.bound_to != identity && inbound.bound_to != egress {
+            continue;
+        }
+        if let Err(err) = current.bind(&inbound.tag, "").await {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("解绑入站 {} 失败，组未删除：{err}", inbound.id),
+            );
+        }
+        unbound.push(inbound.id);
     }
+    drop(current);
+    if let Err(err) = state.pools.delete_pool(&req.id).await {
+        return error(StatusCode::BAD_GATEWAY, err.to_string());
+    }
+    if let Some(panel) = state.manager.panel() {
+        if let Err(err) = panel.on_tunnels_changed().await {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!("组已删除，但清理后端出站失败：{err}"),
+            );
+        }
+    }
+    Json(json!({"ok": "已删除", "unbound": unbound})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -316,8 +382,8 @@ pub async fn pool_cred(
         .set_cred(
             &req.id,
             crate::models::SocksCred {
-                user: req.user,
-                pass: req.pass,
+                user: req.user.trim().to_string(),
+                pass: req.pass.trim().to_string(),
             },
         )
         .await
@@ -430,7 +496,7 @@ pub async fn client_openvpn_repo(Query(q): Query<OffQuery>) -> Response {
 
 pub async fn client_openvpn_build(State(state): State<Arc<AppState>>) -> Response {
     match crate::clients::start_openvpn_source_build(state.manager.jobs.clone()).await {
-        Ok(job) => Json(json!({"ok": true, "job": job.view().await.id,
+        Ok(job) => Json(json!({"ok": true, "job": job.id(),
             "message": "已在后台开始编译，进度在这张卡和出口页的作业卡片里"}))
         .into_response(),
         Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
@@ -503,11 +569,23 @@ pub async fn settings(
     State(state): State<Arc<AppState>>,
     body: Option<Json<SettingsReq>>,
 ) -> Response {
+    let mut restarting = false;
+    let mut base_path = state.basepath.clone();
     if let Some(Json(req)) = body {
-        let mut next = state.manager.settings().await;
+        let old = state.manager.settings().await;
+        let mut next = old.clone();
         if let Some(p) = req.password.filter(|p| !p.is_empty()) {
             if let Err(e) = state.auth.set_password(&p).await {
                 return error(StatusCode::BAD_REQUEST, e.to_string());
+            }
+        }
+        if let Some(path) = req.base_path {
+            match crate::auth::save_basepath(&state.dir, &path) {
+                Ok(saved) => {
+                    restarting |= saved != state.basepath;
+                    base_path = saved;
+                }
+                Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
             }
         }
         if let Some(p) = req.port {
@@ -519,6 +597,7 @@ pub async fn settings(
                 Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
             }
         }
+        restarting |= next.port != old.port || next.listen_addr != old.listen_addr;
         if let Some(v) = req.residential_only {
             next.residential_only = Some(v);
         }
@@ -528,18 +607,22 @@ pub async fn settings(
         if let Err(e) = state.manager.update_settings(next).await {
             return internal(e);
         }
-        if req.base_path.is_some() {
-            return error(StatusCode::CONFLICT, "访问路径改动需要重启服务后生效");
+        if restarting {
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                crate::clients::restart_self();
+            });
         }
     }
     let s = state.manager.settings().await;
     Json(json!({
-        "base_path": state.basepath,
+        "base_path": base_path,
         "port": s.port,
         "listen_addr": s.listen_addr,
         "has_password": true,
         "residential_only": s.residential_only(),
         "conn": s.conn,
+        "restarting": restarting,
         "version": env!("CARGO_PKG_VERSION")
     }))
     .into_response()

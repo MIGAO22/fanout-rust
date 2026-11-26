@@ -305,7 +305,7 @@ pub fn random_short_id() -> String {
     hex::encode(bytes)
 }
 
-pub fn sanitize_tag(name: &str) -> String {
+pub(crate) fn sanitize_tag(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
@@ -321,7 +321,7 @@ pub fn sanitize_tag(name: &str) -> String {
     }
 }
 
-pub fn egress_tag(identity: &str) -> String {
+pub(crate) fn egress_tag(identity: &str) -> String {
     format!("{XUI_TAG_PREFIX}{}", sanitize_tag(identity))
 }
 

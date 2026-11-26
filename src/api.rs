@@ -12,7 +12,7 @@ use crate::{
     appstate::AppState,
     config::ConnSettings,
     manager::{Manager, ProvisionRequest},
-    models::{ExitsView, WarpOverview},
+    models::{ExitInbound, ExitsView, WarpOverview},
 };
 
 pub fn error(status: StatusCode, msg: impl Into<String>) -> Response {
@@ -28,15 +28,59 @@ pub async fn health() -> impl IntoResponse {
 }
 
 pub async fn exits(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let m = &state.manager;
-    let panel = state.panel.status().await;
+    let mut exits = state.manager.exits().await;
+    let mut pools = state.pools.views().await;
+    let status = state.panel.status().await;
+    let mut panel_error = String::new();
+    let mut direct = Vec::new();
+
+    match state
+        .panel
+        .lock_current_panel_from(&state.manager, &state.pools)
+        .await
+    {
+        Ok(current) => match current.inbounds().await {
+            Ok(inbounds) => {
+                let by_host: HashMap<_, _> = exits
+                    .iter()
+                    .enumerate()
+                    .map(|(index, exit)| (crate::panel_native::sanitize_tag(&exit.host), index))
+                    .collect();
+                let by_pool: HashMap<_, _> = pools
+                    .iter()
+                    .enumerate()
+                    .map(|(index, pool)| (crate::panel_native::sanitize_tag(&pool.identity), index))
+                    .collect();
+                for inbound in inbounds {
+                    let row = ExitInbound {
+                        id: inbound.id,
+                        port: inbound.port,
+                        remark: inbound.remark,
+                        protocol: inbound.protocol,
+                        enable: inbound.enable,
+                        tag: inbound.tag,
+                    };
+                    if let Some(index) = by_host.get(&inbound.bound_to) {
+                        exits[*index].inbounds.push(row);
+                    } else if let Some(index) = by_pool.get(&inbound.bound_to) {
+                        pools[*index].inbounds.push(row);
+                    } else {
+                        direct.push(row);
+                    }
+                }
+            }
+            Err(err) => panel_error = err.to_string(),
+        },
+        Err(err) => panel_error = err.to_string(),
+    }
+
     Json(ExitsView {
-        exits: m.exits().await,
-        direct: Vec::new(),
-        pools: state.pools.views().await,
-        panel: Vec::new(),
-        backend: panel.kind.unwrap_or_else(|| "native".into()),
-        panel_info: panel.describe.unwrap_or_default(),
+        exits,
+        direct,
+        pools,
+        panel: panel_error,
+        backend: status.kind.unwrap_or_else(|| "native".into()),
+        panel_info: status.describe.unwrap_or_default(),
         public_ip: crate::publicip::host_public_ip(),
         warp: warp_overview(&state).await,
     })
@@ -479,10 +523,38 @@ fn req_host(headers: &HeaderMap) -> String {
         .to_string()
 }
 
+fn public_host(headers: &HeaderMap) -> String {
+    let public_ip = crate::publicip::host_public_ip();
+    if !public_ip.is_empty() {
+        return public_ip;
+    }
+    let authority = req_host(headers);
+    let host = authority
+        .rfind(':')
+        .filter(|index| *index > 0)
+        .map_or(authority.as_str(), |index| &authority[..index]);
+    if host.is_empty() || host == "127.0.0.1" || host == "localhost" {
+        "<服务器IP>".to_string()
+    } else {
+        host.to_string()
+    }
+}
+
+fn token_matches(expected: &str, supplied: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let expected = Sha256::digest(expected.as_bytes());
+    let supplied = Sha256::digest(supplied.as_bytes());
+    expected
+        .iter()
+        .zip(supplied.iter())
+        .fold(0_u8, |acc, (left, right)| acc | (left ^ right))
+        == 0
+}
+
 pub async fn sub_info(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     match crate::sub::sub_token(&state.dir) {
         Ok(token) => {
-            let path = crate::sub::sub_path(&token);
+            let path = crate::sub::sub_path_with_base(&state.basepath, &token);
             Json(json!({"token": token, "path": path, "url": format!("http://{}{}", req_host(&headers), path)})).into_response()
         }
         Err(e) => internal(e),
@@ -492,7 +564,7 @@ pub async fn sub_info(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
 pub async fn sub_reset(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     match crate::sub::reset_sub_token(&state.dir) {
         Ok(token) => {
-            let path = crate::sub::sub_path(&token);
+            let path = crate::sub::sub_path_with_base(&state.basepath, &token);
             Json(json!({"token": token, "path": path, "url": format!("http://{}{}", req_host(&headers), path)})).into_response()
         }
         Err(e) => internal(e),
@@ -510,29 +582,119 @@ pub struct SubQuery {
 pub async fn subscription(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SubQuery>,
+    headers: HeaderMap,
 ) -> Response {
     let expected = match crate::sub::sub_token(&state.dir) {
-        Ok(t) => t,
-        Err(e) => return internal(e),
+        Ok(token) => token,
+        Err(err) => return internal(err),
     };
-    if q.token != expected {
+    if !token_matches(&expected, &q.token) {
         return error(StatusCode::NOT_FOUND, "not found");
     }
-    let links: Vec<String> = Vec::new();
-    match crate::sub::encode_sub(&links, q.target.as_deref().unwrap_or("base64")) {
+    let target = q
+        .target
+        .as_deref()
+        .unwrap_or("base64")
+        .trim()
+        .to_lowercase();
+    let target = match target.as_str() {
+        "" | "base64" | "b64" | "v2ray" => "base64",
+        "links" | "plain" | "text" => "links",
+        _ => return error(StatusCode::BAD_REQUEST, "target 只支持 base64 或 links"),
+    };
+    let current = match state
+        .panel
+        .lock_current_panel_from(&state.manager, &state.pools)
+        .await
+    {
+        Ok(current) => current,
+        Err(err) => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "生成订阅失败: {}",
+                    crate::util::one_line(&err.to_string(), 400)
+                ),
+            )
+        }
+    };
+    let panel = current.panel();
+    let inbounds = match panel.inbounds().await {
+        Ok(inbounds) => inbounds,
+        Err(err) => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "生成订阅失败: {}",
+                    crate::util::one_line(&err.to_string(), 400)
+                ),
+            )
+        }
+    };
+    let bound_hosts: std::collections::HashSet<_> = state
+        .manager
+        .exits()
+        .await
+        .iter()
+        .map(|exit| crate::panel_native::sanitize_tag(&exit.host))
+        .collect();
+    let bound_only = q.bound.as_deref() != Some("0");
+    let ids: Vec<_> = inbounds
+        .into_iter()
+        .filter(|inbound| {
+            inbound.enable && (!bound_only || bound_hosts.contains(&inbound.bound_to))
+        })
+        .map(|inbound| inbound.id)
+        .collect();
+    if ids.is_empty() {
+        return error(
+            StatusCode::NOT_FOUND,
+            "还没有可订阅的节点，先开出口并建节点链接",
+        );
+    }
+    let host = q
+        .host
+        .as_deref()
+        .filter(|host| !host.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| public_host(&headers));
+    let links = match panel.inbound_links(&ids, &host).await {
+        Ok(links) => links,
+        Err(err) => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "生成订阅失败: {}",
+                    crate::util::one_line(&err.to_string(), 400)
+                ),
+            )
+        }
+    };
+    if links.is_empty() {
+        return error(
+            StatusCode::NOT_FOUND,
+            "还没有可订阅的节点，先开出口并建节点链接",
+        );
+    }
+    match crate::sub::encode_sub(&links, target) {
         Ok(body) => {
-            let mut h = HeaderMap::new();
-            h.insert(
+            let mut response_headers = HeaderMap::new();
+            response_headers.insert(
                 header::CONTENT_TYPE,
                 "text/plain; charset=utf-8".parse().unwrap(),
             );
-            h.insert(
+            response_headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+            response_headers.insert(
                 axum::http::HeaderName::from_static("profile-update-interval"),
                 "12".parse().unwrap(),
             );
-            (h, body).into_response()
+            response_headers.insert(
+                header::CONTENT_DISPOSITION,
+                "inline; filename=fanout".parse().unwrap(),
+            );
+            (response_headers, body).into_response()
         }
-        Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
+        Err(err) => error(StatusCode::BAD_REQUEST, err.to_string()),
     }
 }
 

@@ -150,13 +150,15 @@ async fn main() -> Result<()> {
         }),
     );
     let pools = Arc::new(pool_service::PoolService::new(dir.clone(), manager.clone()).await?);
-    let panels = panel_runtime::PanelManager::with_mode(
-        dir.clone(),
-        manager.clone(),
-        pools.clone(),
-        args.panel.as_deref().unwrap_or(""),
-    )
-    .await;
+    let panels = Arc::new(
+        panel_runtime::PanelManager::with_mode(
+            dir.clone(),
+            manager.clone(),
+            pools.clone(),
+            args.panel.as_deref().unwrap_or(""),
+        )
+        .await,
+    );
     manager.set_panel(panels.clone() as Arc<dyn panel::Panel>);
     let state = Arc::new(appstate::AppState {
         auth,
@@ -174,14 +176,6 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         health_manager.health_loop().await;
     });
-    let pool_probe = state.pools.clone();
-    tokio::spawn(async move {
-        loop {
-            pool_probe.probe_stale().await;
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        }
-    });
-
     if !tag.is_empty() {
         tracing::info!("非默认工作目录，本实例用 netns fo{tag}*");
     }
@@ -233,7 +227,7 @@ async fn main() -> Result<()> {
     }
     let app = app.with_state(state.clone());
     let app = app.merge(panel_api::panel_routes(
-        panels.clone(),
+        panels.as_ref().clone(),
         state.manager.clone(),
         state.pools.clone(),
     ));

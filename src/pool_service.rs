@@ -10,9 +10,11 @@ use crate::{
     nodes::{new_socks_cred, node_supports_aead, validate_cred},
     panel_native::egress_tag,
     pools_logic::{
-        canonical_pool_mode, load_pool_store, parse_pool_seq, pool_view, target_key, PoolMember,
-        PoolRuntimeState, POOL_MODE_BALANCE, POOL_MODE_SINGLE, POOL_PROBE_INTERVAL,
-        POOL_PROBE_TARGET, POOL_TRY_TIMEOUT,
+        assess_pool_fill, canonical_pool_mode, creation_room, fill_avoid, fill_candidates,
+        fill_completion_note, fill_failure_reason, fill_slot, host_in_pool, load_pool_store,
+        parse_pool_seq, pool_reuse_pick, pool_view, retire_slot, target_key, PoolFillState,
+        PoolMember, PoolRuntimeState, POOL_FILL_INTERVAL, POOL_FILL_SLOT_FLOOR, POOL_MODE_BALANCE,
+        POOL_MODE_SINGLE, POOL_PROBE_INTERVAL, POOL_PROBE_TARGET, POOL_TRY_TIMEOUT,
     },
     socks5::{serve_socks, DialNetwork, DialSocket, SocksDialer},
 };
@@ -117,6 +119,7 @@ struct ServiceState {
     store: PoolStore,
     runs: HashMap<String, Arc<PoolRun>>,
     probing: HashSet<(String, String)>,
+    fill: PoolFillState,
 }
 
 struct PoolServiceInner {
@@ -127,6 +130,7 @@ struct PoolServiceInner {
     closed: AtomicBool,
     shutdown: CancellationToken,
     probe_task: StdMutex<Option<JoinHandle<()>>>,
+    fill_task: StdMutex<Option<JoinHandle<()>>>,
 }
 
 impl Drop for PoolServiceInner {
@@ -134,6 +138,9 @@ impl Drop for PoolServiceInner {
         self.closed.store(true, Ordering::SeqCst);
         self.shutdown.cancel();
         if let Some(task) = lock_unpoisoned(&self.probe_task).take() {
+            task.abort();
+        }
+        if let Some(task) = lock_unpoisoned(&self.fill_task).take() {
             task.abort();
         }
         let runs = {
@@ -287,6 +294,7 @@ impl PoolService {
             closed: AtomicBool::new(false),
             shutdown: CancellationToken::new(),
             probe_task: StdMutex::new(None),
+            fill_task: StdMutex::new(None),
         });
         let service = Self { inner };
         for pool in service.pools() {
@@ -299,8 +307,10 @@ impl PoolService {
         }
 
         let shutdown = service.inner.shutdown.clone();
-        let task = tokio::spawn(probe_loop(service.clone(), shutdown));
+        let task = tokio::spawn(probe_loop(service.clone(), shutdown.clone()));
         *lock_unpoisoned(&service.inner.probe_task) = Some(task);
+        let fill_task = tokio::spawn(fill_loop(service.clone(), shutdown));
+        *lock_unpoisoned(&service.inner.fill_task) = Some(fill_task);
         Ok(service)
     }
 
@@ -361,7 +371,11 @@ impl PoolService {
             .ok_or_else(|| anyhow!("出口组不存在"))?;
         store.pools.remove(index);
         store.save(&self.inner.dir)?;
-        lock_unpoisoned(&self.inner.state).store = store;
+        {
+            let mut state = lock_unpoisoned(&self.inner.state);
+            state.store = store;
+            state.fill.drop_ledger(id);
+        }
         let run = lock_unpoisoned(&self.inner.state).runs.remove(id);
         if let Some(run) = run {
             run.stop().await;
@@ -457,7 +471,17 @@ impl PoolService {
             let running = lock_unpoisoned(&self.inner.state)
                 .runs
                 .contains_key(&pool.id);
-            views.push(pool_view(&pool, &members, running, None, &aead_hosts));
+            let note = lock_unpoisoned(&self.inner.state)
+                .fill
+                .notes()
+                .remove(&pool.id);
+            views.push(pool_view(
+                &pool,
+                &members,
+                running,
+                note.as_deref(),
+                &aead_hosts,
+            ));
         }
         views
     }
@@ -684,6 +708,207 @@ impl PoolService {
         }
     }
 
+    /// Runs one autofill pass. A previous pass that is still connecting a new
+    /// exit makes this call a no-op, so slow nodes cannot queue extra work.
+    pub async fn fill_once(&self) {
+        if !self.ensure_open().is_ok() {
+            return;
+        }
+        {
+            let mut state = lock_unpoisoned(&self.inner.state);
+            if !state.fill.begin_fill() {
+                return;
+            }
+        }
+        for pool in self.pools() {
+            if pool.auto_fill {
+                self.fill_pool(&pool).await;
+            }
+        }
+        let mut state = lock_unpoisoned(&self.inner.state);
+        state.fill.finish_fill();
+        state.fill.prune_bad(Utc::now());
+    }
+
+    async fn fill_pool(&self, pool: &Pool) {
+        let now = Utc::now();
+        let mut first_dead = lock_unpoisoned(&self.inner.state)
+            .fill
+            .dead_snapshot(&pool.id);
+        let members = self.resolve_members(&pool.id).await;
+        let assessment = assess_pool_fill(pool, &members, &mut first_dead, now);
+        {
+            let mut state = lock_unpoisoned(&self.inner.state);
+            state.fill.merge_dead(&pool.id, first_dead, &state.store);
+        }
+        if assessment.need == 0 {
+            lock_unpoisoned(&self.inner.state)
+                .fill
+                .set_note(&pool.id, assessment.note);
+            return;
+        }
+
+        let tunnels = self.inner.manager.states().await;
+        let candidates = {
+            let state = lock_unpoisoned(&self.inner.state);
+            fill_candidates(
+                &state.store.pools,
+                &pool.id,
+                &tunnels,
+                &state.fill.bad_until,
+                now,
+            )
+        };
+        let picks = pool_reuse_pick(&candidates, assessment.need);
+        let mut reused = 0;
+        for host in picks {
+            let old_host = fill_slot(&assessment.gone, reused).unwrap_or("");
+            if self.reuse_one(pool, old_host, &host).await {
+                reused += 1;
+            }
+        }
+
+        let mut room = creation_room(
+            self.inner
+                .manager
+                .max_slots
+                .saturating_sub(self.inner.manager.tunnels().await.len()),
+        );
+        let mut created = 0;
+        let mut reason = None;
+        for index in 0..assessment.need.saturating_sub(reused) {
+            if room == 0 {
+                break;
+            }
+            room -= 1;
+            let current_members = self.resolve_members(&pool.id).await;
+            let avoid = {
+                let state = lock_unpoisoned(&self.inner.state);
+                fill_avoid(&current_members, &state.fill.bad_until, Utc::now())
+            };
+            let node = match self.pick_fill_node(&avoid).await {
+                Ok(node) => node,
+                Err(err) => {
+                    reason = Some(err.to_string());
+                    break;
+                }
+            };
+            let old_host = fill_slot(&assessment.gone, reused + created).unwrap_or("");
+            match self.fill_one(pool, node, old_host).await {
+                Ok(()) => created += 1,
+                Err(host) => reason = Some(fill_failure_reason(&host)),
+            }
+        }
+        let note = fill_completion_note(pool, &assessment, reused, created, reason);
+        lock_unpoisoned(&self.inner.state)
+            .fill
+            .set_note(&pool.id, note);
+    }
+
+    async fn pick_fill_node(&self, avoid: &HashSet<String>) -> Result<crate::models::Node> {
+        self.inner.manager.ensure_nodes().await.ok();
+        let nodes = self.inner.manager.node_list(false).await.0;
+        let used: HashSet<_> = self
+            .inner
+            .manager
+            .states()
+            .await
+            .into_iter()
+            .map(|state| state.node.hostname)
+            .collect();
+        nodes
+            .into_iter()
+            .find(|node| !avoid.contains(&node.hostname) && !used.contains(&node.hostname))
+            .ok_or_else(|| anyhow!("挑不到可补位的空闲节点"))
+    }
+
+    async fn reuse_one(&self, pool: &Pool, old_host: &str, host: &str) -> bool {
+        if let Err(err) = self.swap_member(&pool.id, old_host, host).await {
+            warn!("出口组 {} 顶替 {} 失败: {err}", pool.name, host);
+            return false;
+        }
+        lock_unpoisoned(&self.inner.state)
+            .fill
+            .forget_dead(&pool.id, old_host);
+        self.retire_member(old_host).await;
+        true
+    }
+
+    async fn fill_one(&self, pool: &Pool, node: crate::models::Node, old_host: &str) -> Result<()> {
+        let tunnel = match self.inner.manager.start(node.clone()).await {
+            Ok(tunnel) => tunnel,
+            Err(err) => {
+                warn!("出口组 {} 补位起不来: {err}", pool.name);
+                self.mark_fill_bad(&node.hostname).await;
+                return Err(node.hostname);
+            }
+        };
+        if self
+            .inner
+            .manager
+            .wait_up(&tunnel, Duration::from_secs(420))
+            .await
+            != "up"
+        {
+            let _ = self.inner.manager.stop(tunnel.slot).await;
+            self.mark_fill_bad(&node.hostname).await;
+            return Err(node.hostname);
+        }
+        if let Err(err) = self.swap_member(&pool.id, old_host, &node.hostname).await {
+            warn!("出口组 {} 补位成功但写回成员失败: {err}", pool.name);
+            self.mark_fill_bad(&node.hostname).await;
+            return Err(node.hostname);
+        }
+        lock_unpoisoned(&self.inner.state)
+            .fill
+            .forget_dead(&pool.id, old_host);
+        self.retire_member(old_host).await;
+        Ok(())
+    }
+
+    async fn mark_fill_bad(&self, host: &str) {
+        lock_unpoisoned(&self.inner.state)
+            .fill
+            .mark_bad(host, Utc::now());
+    }
+
+    async fn swap_member(&self, id: &str, old_host: &str, new_host: &str) -> Result<()> {
+        let mut state = lock_unpoisoned(&self.inner.state);
+        let mut store = state.store.clone();
+        if store.swap_member(id, old_host, new_host)? {
+            store.save(&self.inner.dir)?;
+            state.store = store;
+        }
+        Ok(())
+    }
+
+    async fn retire_member(&self, host: &str) {
+        let Some(tunnel) = self
+            .inner
+            .manager
+            .states()
+            .await
+            .into_iter()
+            .find(|state| state.node.hostname == host)
+        else {
+            return;
+        };
+        let used_by_pool = host_in_pool(&self.pools(), host);
+        let inbound_bound = self.host_bound(host).await;
+        if let Some(slot) = retire_slot(host, Some(&tunnel), used_by_pool, inbound_bound) {
+            if let Err(err) = self.inner.manager.stop(slot).await {
+                warn!("出口组顶替后收尾 {host} 失败: {err}");
+            }
+        }
+    }
+
+    async fn host_bound(&self, host: &str) -> Option<bool> {
+        let panel = self.inner.manager.panel()?;
+        let inbounds = panel.inbounds().await.ok()?;
+        let tag = crate::panel_native::sanitize_tag(host);
+        Some(inbounds.iter().any(|inbound| inbound.bound_to == tag))
+    }
+
     /// Stops probing and all listeners. Established relay sessions are not
     /// forcibly aborted. Calling `close` more than once is safe.
     pub async fn close(&self) {
@@ -694,6 +919,11 @@ impl PoolService {
         self.inner.shutdown.cancel();
         let probe_task = lock_unpoisoned(&self.inner.probe_task).take();
         if let Some(task) = probe_task {
+            task.abort();
+            let _ = task.await;
+        }
+        let fill_task = lock_unpoisoned(&self.inner.fill_task).take();
+        if let Some(task) = fill_task {
             task.abort();
             let _ = task.await;
         }
@@ -1002,6 +1232,19 @@ async fn probe_loop(service: PoolService, shutdown: CancellationToken) {
             _ = shutdown.cancelled() => break,
             _ = ticker.tick() => {
                 service.probe_stale().await;
+            }
+        }
+    }
+}
+
+async fn fill_loop(service: PoolService, shutdown: CancellationToken) {
+    let mut ticker = interval_at(Instant::now() + POOL_FILL_INTERVAL, POOL_FILL_INTERVAL);
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => break,
+            _ = ticker.tick() => {
+                service.fill_once().await;
             }
         }
     }

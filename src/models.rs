@@ -140,10 +140,10 @@ pub struct PoolView {
 pub struct ExitsView {
     pub exits: Vec<Exit>,
     #[serde(default)]
-    pub direct: Vec<serde_json::Value>,
+    pub direct: Vec<ExitInbound>,
     pub pools: Vec<PoolView>,
     #[serde(default)]
-    pub panel: Vec<serde_json::Value>,
+    pub panel: String,
     pub backend: String,
     pub panel_info: String,
     pub public_ip: String,

@@ -4,6 +4,7 @@ use crate::{
 };
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use rand::RngCore;
 use std::path::Path;
 
 pub fn sub_token(dir: &Path) -> Result<String> {
@@ -11,7 +12,7 @@ pub fn sub_token(dir: &Path) -> Result<String> {
     if let Some(t) = s.sub_token.as_ref().filter(|t| !t.is_empty()) {
         return Ok(t.clone());
     }
-    let t = random_token(24);
+    let t = sub_token_value();
     s.sub_token = Some(t.clone());
     save_settings(dir, &s)?;
     Ok(t)
@@ -19,14 +20,29 @@ pub fn sub_token(dir: &Path) -> Result<String> {
 
 pub fn reset_sub_token(dir: &Path) -> Result<String> {
     let mut s = load_settings(dir, crate::config::DEFAULT_PORT, false)?;
-    let t = random_token(24);
+    let t = sub_token_value();
     s.sub_token = Some(t.clone());
     save_settings(dir, &s)?;
     Ok(t)
 }
 
+fn sub_token_value() -> String {
+    let mut bytes = [0_u8; 20];
+    rand::thread_rng().fill(&mut bytes);
+    hex::encode(bytes)
+}
+
 pub fn sub_path(token: &str) -> String {
     format!("/sub?token={token}")
+}
+
+pub fn sub_path_with_base(base_path: &str, token: &str) -> String {
+    let base = base_path.trim_matches('/');
+    if base.is_empty() {
+        sub_path(token)
+    } else {
+        format!("/{base}/sub?token={token}")
+    }
 }
 
 pub fn sub_full_url(req_host: &str, token: &str) -> String {

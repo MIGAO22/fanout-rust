@@ -450,7 +450,7 @@ pub async fn panel_mode(State(api): State<PanelApi>, method: Method, body: Bytes
             };
             let panel = match api.panel.switch_mode(mode).await {
                 Ok(panel) => panel,
-                Err(err) => return bad_request(err),
+                Err(err) => return bad_request(err.to_string()),
             };
             Json(json!({
                 "mode": api.panel.current_mode(),

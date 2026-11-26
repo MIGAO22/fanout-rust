@@ -175,6 +175,10 @@ impl Manager {
         let _ = self.panel.set(panel);
     }
 
+    pub fn panel(&self) -> Option<Arc<dyn Panel>> {
+        self.panel.get().cloned()
+    }
+
     pub async fn settings(&self) -> WebSettings {
         self.settings.read().await.clone()
     }

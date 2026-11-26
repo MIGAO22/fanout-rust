@@ -25,7 +25,8 @@ use crate::{
 
 const WARP_API_VER: &str = "v0a2317";
 const WARP_CLIENT_VERSION: &str = "2026.8.2115.0";
-const WARP_REGISTER_CONCURRENCY: usize = 4;
+const WARP_REGISTER_CONCURRENCY: usize = 2;
+const WARP_REGISTER_ATTEMPTS: usize = 5;
 
 pub struct WarpService {
     dir: std::path::PathBuf,
@@ -87,25 +88,41 @@ impl WarpService {
     async fn register(&self, slot: usize, version: &str) -> Result<WarpAccount> {
         let (priv_key, pub_key) = crate::warp_logic::new_warp_keys()?;
         let req = new_warp_reg_request(&pub_key, version)?;
-        let resp = self
-            .client
-            .post(format!(
-                "https://api.cloudflareclient.com/{WARP_API_VER}/reg"
-            ))
-            .json(&req)
-            .send()
-            .await?
-            .error_for_status()?;
-        let body = resp.bytes().await?;
-        let parsed = parse_warp_reg(&body)?;
-        warp_account_of(
-            slot,
-            &parsed,
-            &priv_key,
-            &pub_key,
-            version,
-            chrono::Utc::now(),
-        )
+        for attempt in 0..WARP_REGISTER_ATTEMPTS {
+            let resp = self
+                .client
+                .post(format!(
+                    "https://api.cloudflareclient.com/{WARP_API_VER}/reg"
+                ))
+                .json(&req)
+                .send()
+                .await?;
+            if resp.status() == 429 {
+                let retry_after = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or_else(|| (2_u64 << attempt).min(30));
+                if attempt + 1 == WARP_REGISTER_ATTEMPTS {
+                    anyhow::bail!("Cloudflare 注册限流，重试 {} 次仍失败", attempt + 1);
+                }
+                tokio::time::sleep(Duration::from_secs(retry_after.max(1))).await;
+                continue;
+            }
+            let resp = resp.error_for_status()?;
+            let body = resp.bytes().await?;
+            let parsed = parse_warp_reg(&body)?;
+            return warp_account_of(
+                slot,
+                &parsed,
+                &priv_key,
+                &pub_key,
+                version,
+                chrono::Utc::now(),
+            );
+        }
+        unreachable!("registration attempts are non-zero")
     }
 
     async fn slot_lock(&self, slot: usize) -> Arc<Mutex<()>> {
@@ -145,6 +162,31 @@ impl WarpService {
         accounts.push(a.clone());
         self.save(&accounts).await?;
         Ok(a)
+    }
+
+    pub async fn rotate(&self, slot: usize, version: &str) -> Result<WarpAccount> {
+        let slot_lock = self.slot_lock(slot).await;
+        let _slot_guard = slot_lock.lock().await;
+        let _permit = self
+            .lock
+            .acquire()
+            .await
+            .map_err(|_| anyhow::anyhow!("WARP 服务已关闭"))?;
+        let old = {
+            let accounts = self.accounts.lock().await;
+            accounts.iter().find(|a| a.slot == slot).cloned()
+        };
+        let account = self.register(slot, version).await?;
+        {
+            let mut accounts = self.accounts.lock().await;
+            accounts.retain(|a| a.slot != slot);
+            accounts.push(account.clone());
+            self.save(&accounts).await?;
+        }
+        if let Some(old) = old {
+            unregister(&self.client, &old).await;
+        }
+        Ok(account)
     }
 
     pub async fn remove(&self, slot: usize) -> Result<()> {
@@ -401,11 +443,7 @@ impl WarpService {
                 async move {
                     let host = tunnel.host().await;
                     job.set(at, "running", "正在重新注册").await;
-                    if let Err(err) = self.remove(tunnel.slot).await {
-                        job.set(at, "failed", &err.to_string()).await;
-                        return;
-                    }
-                    let account = match self.ensure(tunnel.slot, &version).await {
+                    let account = match self.rotate(tunnel.slot, &version).await {
                         Ok(account) => account,
                         Err(err) => {
                             job.set(at, "failed", &err.to_string()).await;

@@ -274,9 +274,9 @@ async fn runtime_selection_covers_affinity_cooldown_latency_and_udp_fallback() {
     assert_eq!(first_host(&degraded), "b");
     assert_eq!(degraded.order.last().unwrap().host, "a");
 
-    run.note_success("a", Duration::from_millis(10));
-    run.note_success("b", Duration::from_millis(200));
-    run.note_success("c", Duration::from_millis(300));
+    run.note_success("probe", "a", Duration::from_millis(10));
+    run.note_success("probe", "b", Duration::from_millis(200));
+    run.note_success("probe", "c", Duration::from_millis(300));
     run.apply_state(&mut members);
     assert!(!members[0].cooling);
     run.reconfigure(POOL_MODE_BALANCE, 5);

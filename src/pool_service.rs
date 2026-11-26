@@ -32,7 +32,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex as StdMutex, MutexGuard, OnceLock, Weak,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant as StdInstant},
 };
 use tokio::{
     net::TcpListener,
@@ -123,7 +123,7 @@ struct ServiceState {
     runs: HashMap<String, Arc<PoolRun>>,
     probing: HashSet<(String, String)>,
     fill: PoolFillState,
-    member_cache: HashMap<String, (Instant, Vec<ResolvedMember>)>,
+    member_cache: HashMap<String, (StdInstant, Vec<ResolvedMember>)>,
 }
 
 struct PoolServiceInner {
@@ -977,7 +977,7 @@ impl PoolService {
     }
 
     async fn resolved_members(&self, id: &str) -> Vec<ResolvedMember> {
-        if let Some((at, members)) = lock_unpoisoned(&self.inner.state)
+        if let Some((_at, members)) = lock_unpoisoned(&self.inner.state)
             .member_cache
             .get(id)
             .filter(|(at, _)| at.elapsed() < MEMBER_CACHE_TTL)
@@ -1045,7 +1045,7 @@ impl PoolService {
             }
             state
                 .member_cache
-                .insert(id.to_string(), (Instant::now(), members.clone()));
+                .insert(id.to_string(), (StdInstant::now(), members.clone()));
         }
         members
     }

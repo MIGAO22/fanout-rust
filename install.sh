@@ -67,6 +67,7 @@ error_log="/var/log/fanout-rust.log"
 respawn_delay=5
 respawn_max=0
 supervisor=supervise-daemon
+start_pre() { ulimit -n 65536 2>/dev/null || true; }
 depend() { need net; after firewall; }
 INITEOF
     chmod +x /etc/init.d/fanout-rust

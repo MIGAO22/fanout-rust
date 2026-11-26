@@ -358,6 +358,12 @@ do_update() {
   tar xzf "$tmp/f.tar.gz" -C "$tmp"
   svc_stop
   install -m 755 "$tmp/fanout-rust" "$BIN"
+  if [[ $INIT_SYS == systemd && -f "$tmp/fanout-rust.service" ]]; then
+    sed "s#-web [0-9]* ##; s#-dir /var/lib/fanout#-dir ${WORK_DIR}#" \
+      "$tmp/fanout-rust.service" > "$UNIT.new.$$"
+    mv -f "$UNIT.new.$$" "$UNIT"
+    svc_reload
+  fi
   # 菜单脚本一起换掉，否则这个脚本删掉的选项在已装机器上会一直留着。
   # 必须先 install 到别处再 mv：正在跑的就是 /usr/local/bin/f，就地 truncate
   # 同一个 inode 会让 bash 后面的读取错位，菜单跑到一半散架。

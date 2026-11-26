@@ -10,6 +10,7 @@ Type=simple
 ExecStart=/usr/local/bin/fanout-rust -dir /var/lib/fanout
 Restart=on-failure
 RestartSec=5
+LimitNOFILE=65536:524288
 # 退出时给足时间清理 netns 与 openvpn 子进程
 TimeoutStopSec=30
 KillMode=mixed

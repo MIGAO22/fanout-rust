@@ -410,7 +410,8 @@ impl PanelManager {
 
     /// Open (if needed), refresh, and return the current backend.
     pub async fn current_panel(&self) -> Result<Arc<dyn Panel>> {
-        self.refresh_snapshot().await
+        self.refresh_snapshot_from(&self.inner.manager, &self.inner.pools)
+            .await
     }
 
     /// Runtime mode switch. An empty mode restores automatic detection. The

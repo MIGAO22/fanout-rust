@@ -157,7 +157,7 @@ async fn main() -> Result<()> {
         args.panel.as_deref().unwrap_or(""),
     )
     .await;
-    manager.set_panel(panels.clone());
+    manager.set_panel(panels.clone() as Arc<dyn panel::Panel>);
     let state = Arc::new(appstate::AppState {
         auth,
         manager: manager.clone(),

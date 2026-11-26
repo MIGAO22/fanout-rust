@@ -48,22 +48,19 @@ impl PanelApi {
     /// authenticated application router.
     pub fn router(&self) -> Router {
         Router::new()
-            .route("/api/xui", get(Self::xui_status))
-            .route("/api/xui/inbounds", get(Self::xui_inbounds))
-            .route("/api/xui/detail", get(Self::xui_detail))
-            .route("/api/xui/links", get(Self::xui_links))
-            .route("/api/xui/bind", post(Self::xui_bind))
-            .route("/api/xui/clone", post(Self::xui_clone))
-            .route("/api/xui/delete", post(Self::xui_delete))
-            .route("/api/panel/inbound/new", post(Self::inbound_create))
-            .route("/api/panel/inbound/update", post(Self::inbound_update))
-            .route("/api/panel/client/add", post(Self::client_add))
-            .route("/api/panel/client/del", post(Self::client_delete))
-            .route("/api/panel/client/reset", post(Self::client_reset))
-            .route(
-                "/api/panel/mode",
-                get(Self::panel_mode).post(Self::panel_mode),
-            )
+            .route("/api/xui", get(xui_status))
+            .route("/api/xui/inbounds", get(xui_inbounds))
+            .route("/api/xui/detail", get(xui_detail))
+            .route("/api/xui/links", get(xui_links))
+            .route("/api/xui/bind", post(xui_bind))
+            .route("/api/xui/clone", post(xui_clone))
+            .route("/api/xui/delete", post(xui_delete))
+            .route("/api/panel/inbound/new", post(inbound_create))
+            .route("/api/panel/inbound/update", post(inbound_update))
+            .route("/api/panel/client/add", post(client_add))
+            .route("/api/panel/client/del", post(client_delete))
+            .route("/api/panel/client/reset", post(client_reset))
+            .route("/api/panel/mode", get(panel_mode).post(panel_mode))
             .with_state(self.clone())
     }
 
@@ -332,7 +329,7 @@ pub async fn inbound_create(
     spec.insert("port".into(), json!(port));
     match panel.create_inbound(&Value::Object(spec)).await {
         Ok(created) => panel_json_response(created),
-        Err(err) => bad_request(err),
+        Err(err) => bad_request(err.to_string()),
     }
 }
 
@@ -364,7 +361,7 @@ pub async fn inbound_update(
     }
     match panel.update_inbound(&id, &patch).await {
         Ok(()) => Json(json!({ "ok": "已保存" })).into_response(),
-        Err(err) => bad_request(err),
+        Err(err) => bad_request(err.to_string()),
     }
 }
 
@@ -397,7 +394,7 @@ async fn client_action(api: &PanelApi, query: &PanelQuery, action: ClientAction)
     };
     match result {
         Ok(()) => Json(json!({ "ok": message })).into_response(),
-        Err(err) => bad_request(err),
+        Err(err) => bad_request(err.to_string()),
     }
 }
 

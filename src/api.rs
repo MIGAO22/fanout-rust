@@ -247,8 +247,10 @@ pub async fn pools(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(json!({
         "pools": state.pools.views().await,
         "modes": modes,
+        "countries": state.manager.country_choices().await,
         "rr_step": crate::models::POOL_DEFAULT_RR_STEP,
-        "max_hosts": crate::models::POOL_MAX_HOSTS
+        "max_hosts": crate::models::POOL_MAX_HOSTS,
+        "max_exits": state.manager.exit_limit()
     }))
 }
 
@@ -265,6 +267,8 @@ pub struct PoolSaveReq {
     pub auto_fill: bool,
     #[serde(default)]
     pub size: usize,
+    #[serde(default)]
+    pub preferred_countries: Vec<String>,
 }
 
 pub async fn pool_save(
@@ -291,6 +295,7 @@ pub async fn pool_save(
         cred: crate::models::SocksCred::default(),
         auto_fill: req.auto_fill,
         size: req.size,
+        preferred_countries: req.preferred_countries,
     };
     if let Err(err) = state.pools.check_pool_hosts(&mut pool).await {
         return error(StatusCode::BAD_REQUEST, err.to_string());

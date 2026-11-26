@@ -132,6 +132,8 @@ pub struct PoolView {
     pub inbounds: Vec<ExitInbound>,
     pub auto_fill: bool,
     pub size: usize,
+    #[serde(default)]
+    pub preferred_countries: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fill_note: String,
 }
@@ -351,6 +353,8 @@ pub struct Pool {
     pub cred: SocksCred,
     pub auto_fill: bool,
     pub size: usize,
+    #[serde(default)]
+    pub preferred_countries: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -362,6 +366,7 @@ pub struct PoolStore {
 pub const POOL_MODES: &[&str] = &["single", "roundrobin", "latency", "race"];
 pub const POOL_DEFAULT_RR_STEP: usize = 5;
 pub const POOL_MAX_HOSTS: usize = 32;
+pub const MAX_EXITS: usize = 20;
 
 pub fn pool_mode_label(mode: &str) -> &'static str {
     match mode {

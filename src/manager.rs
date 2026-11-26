@@ -11,7 +11,7 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 use crate::{
     config::WebSettings,
     jobs::{JobHandle, JobStore},
-    models::{Exit, Node, PersistedTunnel, RegionStat, SocksCred, TunnelState},
+    models::{Exit, Node, PersistedTunnel, RegionStat, SocksCred, TunnelState, MAX_EXITS},
     nodecache::NodeCache,
     nodes::{country_label, new_socks_cred, node_label, order_candidates},
     panel::Panel,
@@ -196,6 +196,10 @@ impl Manager {
         self.panel.get().cloned()
     }
 
+    pub fn exit_limit(&self) -> usize {
+        self.max_slots.min(MAX_EXITS)
+    }
+
     pub async fn settings(&self) -> WebSettings {
         self.settings.read().await.clone()
     }
@@ -259,9 +263,9 @@ impl Manager {
 
     async fn free_slot_port(&self) -> Result<(usize, u16)> {
         let tunnels = self.tunnels.lock().await;
-        let slot = (1..=self.max_slots)
+        let slot = (1..=self.exit_limit())
             .find(|s| !tunnels.contains_key(s))
-            .ok_or_else(|| anyhow!("槽位已满"))?;
+            .ok_or_else(|| anyhow!("出口总数已达 {} 台上限", self.exit_limit()))?;
         let mut ports: HashSet<u16> = tunnels.values().map(|t| t.port).collect();
         for p in crate::pool_service::pool_ports() {
             ports.insert(p);
@@ -615,6 +619,32 @@ impl Manager {
             }
             if n.speed_mbps > r.best_speed_mbps {
                 r.best_speed_mbps = n.speed_mbps;
+            }
+        }
+        let mut out: Vec<_> = map.into_values().collect();
+        out.sort_by(|a, b| a.code.cmp(&b.code));
+        out
+    }
+
+    pub async fn country_choices(&self) -> Vec<RegionStat> {
+        self.ensure_nodes().await.ok();
+        let s = self.settings().await;
+        let nodes = self.nodes.nodes(s.residential_only()).await;
+        let mut map: HashMap<String, RegionStat> = HashMap::new();
+        for node in nodes {
+            let region = map
+                .entry(node.country_code.clone())
+                .or_insert_with(|| RegionStat {
+                    code: node.country_code.clone(),
+                    name: country_label(&node.country_code, &node.country),
+                    ..Default::default()
+                });
+            region.available += 1;
+            if region.best_ping == 0 || node.ping < region.best_ping {
+                region.best_ping = node.ping;
+            }
+            if node.speed_mbps > region.best_speed_mbps {
+                region.best_speed_mbps = node.speed_mbps;
             }
         }
         let mut out: Vec<_> = map.into_values().collect();

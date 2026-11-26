@@ -325,6 +325,64 @@ fn pool_normalization_and_validation_match_go() {
 }
 
 #[test]
+fn preferred_countries_normalize_and_round_up_to_sixty_percent() {
+    let mut pool = Pool {
+        id: "p1".into(),
+        hosts: vec!["a".into()],
+        preferred_countries: vec![" jp ".into(), "JP".into(), "us".into(), "bad".into()],
+        ..Pool::default()
+    };
+    pool.normalize();
+    assert_eq!(pool.preferred_countries, ["JP", "US"]);
+    assert_eq!(preferred_country_target(1), 1);
+    assert_eq!(preferred_country_target(5), 3);
+    assert_eq!(preferred_country_target(20), 12);
+}
+
+#[test]
+fn country_fill_plan_replaces_only_excess_nonpreferred_members() {
+    let pool = Pool {
+        id: "p1".into(),
+        hosts: vec![
+            "jp".into(),
+            "us1".into(),
+            "us2".into(),
+            "us3".into(),
+            "us4".into(),
+        ],
+        auto_fill: true,
+        size: 5,
+        preferred_countries: vec!["JP".into()],
+        ..Pool::default()
+    };
+    let members = [
+        PoolMember {
+            country_code: "JP".into(),
+            ..up_member("jp", Duration::ZERO)
+        },
+        PoolMember {
+            country_code: "US".into(),
+            ..up_member("us1", Duration::ZERO)
+        },
+        PoolMember {
+            country_code: "US".into(),
+            ..up_member("us2", Duration::ZERO)
+        },
+        PoolMember {
+            country_code: "US".into(),
+            ..up_member("us3", Duration::ZERO)
+        },
+        PoolMember {
+            country_code: "US".into(),
+            ..up_member("us4", Duration::ZERO)
+        },
+    ];
+    let plan = country_fill_plan(&pool, &members);
+    assert_eq!(plan.preferred_deficit, 2);
+    assert_eq!(plan.excess_nonpreferred, ["us1", "us2"]);
+}
+
+#[test]
 fn pool_normalization_clamps_steps_size_and_pins_autofill_target() {
     let mut pool = Pool {
         id: "p1".to_string(),
@@ -549,31 +607,37 @@ fn reuse_pick_prefers_spares_then_shared_and_skips_offline() {
     let candidates = [
         PoolFillCand {
             host: "busy1".into(),
+            country_code: String::new(),
             online: true,
             shared: true,
         },
         PoolFillCand {
             host: "spare1".into(),
+            country_code: String::new(),
             online: true,
             shared: false,
         },
         PoolFillCand {
             host: "down1".into(),
+            country_code: String::new(),
             online: false,
             shared: false,
         },
         PoolFillCand {
             host: "spare2".into(),
+            country_code: String::new(),
             online: true,
             shared: false,
         },
         PoolFillCand {
             host: "busy2".into(),
+            country_code: String::new(),
             online: true,
             shared: true,
         },
         PoolFillCand {
             host: "down2".into(),
+            country_code: String::new(),
             online: false,
             shared: true,
         },
@@ -664,6 +728,7 @@ fn fill_assessment_prefers_online_replacement_and_keeps_size() {
 
     let candidates = [PoolFillCand {
         host: "gate-free".to_string(),
+        country_code: String::new(),
         online: true,
         shared: false,
     }];

@@ -44,6 +44,7 @@ pub const POOL_FILL_DEAD_AFTER: Duration = Duration::from_secs(90);
 pub const POOL_FILL_WAIT_UP: Duration = Duration::from_secs(90);
 pub const POOL_FILL_SLOT_FLOOR: usize = 2;
 pub const POOL_FILL_PENALTY: Duration = Duration::from_secs(600);
+pub const POOL_PREFERRED_COUNTRY_PERCENT: usize = 60;
 pub const POOL_MAX_SIZE: usize = POOL_MAX_HOSTS;
 
 /// Returns the canonical Go policy spelling. Rust's `latency` and `race`
@@ -85,6 +86,19 @@ impl Pool {
         }
         self.hosts = hosts;
 
+        let mut countries = Vec::new();
+        let mut seen_countries = HashSet::new();
+        for raw in &self.preferred_countries {
+            let code = raw.trim().to_ascii_uppercase();
+            if code.len() == 2
+                && code.bytes().all(|byte| byte.is_ascii_alphabetic())
+                && seen_countries.insert(code.clone())
+            {
+                countries.push(code);
+            }
+        }
+        self.preferred_countries = countries;
+
         self.size = self.size.min(POOL_MAX_SIZE);
         if self.auto_fill && self.size < 1 {
             self.size = self.hosts.len();
@@ -107,6 +121,57 @@ impl Pool {
             anyhow::bail!("组名最长 64 个字符");
         }
         Ok(())
+    }
+}
+
+pub fn preferred_country_target(size: usize) -> usize {
+    size.saturating_mul(POOL_PREFERRED_COUNTRY_PERCENT)
+        .saturating_add(99)
+        / 100
+}
+
+pub fn country_is_preferred(code: &str, preferred: &[String]) -> bool {
+    preferred
+        .iter()
+        .any(|country| country.eq_ignore_ascii_case(code))
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CountryFillPlan {
+    pub preferred_deficit: usize,
+    pub excess_nonpreferred: Vec<String>,
+}
+
+pub fn country_fill_plan(pool: &Pool, members: &[PoolMember]) -> CountryFillPlan {
+    if pool.preferred_countries.is_empty() {
+        return CountryFillPlan::default();
+    }
+    let target = preferred_country_target(pool.size);
+    let preferred_live = members
+        .iter()
+        .filter(|member| {
+            member.up && country_is_preferred(&member.country_code, &pool.preferred_countries)
+        })
+        .count();
+    let nonpreferred_live = members
+        .iter()
+        .filter(|member| {
+            member.up && !country_is_preferred(&member.country_code, &pool.preferred_countries)
+        })
+        .count();
+    let allowed = pool.size.saturating_sub(target);
+    let excess = nonpreferred_live.saturating_sub(allowed);
+    let deficit = target.saturating_sub(preferred_live);
+    CountryFillPlan {
+        preferred_deficit: deficit,
+        excess_nonpreferred: members
+            .iter()
+            .filter(|member| {
+                member.up && !country_is_preferred(&member.country_code, &pool.preferred_countries)
+            })
+            .take(deficit.min(excess))
+            .map(|member| member.host.clone())
+            .collect(),
     }
 }
 
@@ -221,6 +286,7 @@ struct StoredPool {
     cred: Option<StoredCred>,
     auto_fill: Option<bool>,
     size: Option<i64>,
+    preferred_countries: Option<Vec<String>>,
 }
 
 #[derive(Default, Deserialize)]
@@ -258,6 +324,7 @@ impl From<StoredPool> for Pool {
             },
             auto_fill: stored.auto_fill.unwrap_or(false),
             size: go_usize(stored.size),
+            preferred_countries: stored.preferred_countries.unwrap_or_default(),
         };
         pool.normalize();
         pool
@@ -295,6 +362,7 @@ pub struct PoolMember {
     pub host: String,
     pub namespace: String,
     pub slot: usize,
+    pub country_code: String,
     pub exit_ip: String,
     pub up: bool,
     pub status: String,
@@ -762,6 +830,7 @@ pub fn pool_view(
         inbounds: Vec::new(),
         auto_fill: pool.auto_fill,
         size: pool.size,
+        preferred_countries: pool.preferred_countries.clone(),
         fill_note: fill_note.unwrap_or("").to_string(),
     }
 }
@@ -807,6 +876,7 @@ pub fn pool_gone_hosts(
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PoolFillCand {
     pub host: String,
+    pub country_code: String,
     pub online: bool,
     pub shared: bool,
 }
@@ -863,6 +933,7 @@ pub fn fill_candidates(
             }
             Some(PoolFillCand {
                 host,
+                country_code: tunnel.node.country_code.clone(),
                 online: tunnel.status == "up",
                 shared: shared.contains(&tunnel.node.hostname),
             })

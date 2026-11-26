@@ -693,6 +693,7 @@ function renderOrphans(){
 let poolMeta = null;   // /api/pools 的策略清单，第一次打开编辑器时才取
 let poolEdit = '';     // 正在编辑的组 ID，空串表示新建
 let poolMode = 'single';
+let poolCountries = [];
 
 function poolState(p){
   if(!p.running) return 'failed';
@@ -745,6 +746,9 @@ function poolRow(p){
   const fillTag = p.auto_fill
     ? ' <span class="pt" title="掉线后先用在线出口顶上来，在线的不够才新建">自动补齐 ' + p.size + ' 条</span>'
     : '';
+  const countryTag = (p.preferred_countries || []).length
+    ? ' <span class="pt" title="首选国家至少占维持条数的 60%">首选 ' + esc((p.preferred_countries || []).join('/')) + '</span>'
+    : '';
   // 没补齐时后端会写一句原因（在线出口都用上了 / 槽位余量不够 / 挑不到节点）。
   // 只在还缺人的时候显示，补齐了就闭嘴，否则一个正常的组永远挂着灰字。
   const fillNote = (p.auto_fill && p.fill_note && p.up < p.size)
@@ -757,7 +761,7 @@ function poolRow(p){
     + '<span class="nm">' + esc(p.name)
     +   ' <span class="pt">' + esc(p.mode_label) + '</span>'
     +   ' <span class="pt">' + p.up + '/' + p.total + ' 可用</span>'
-    +   fillTag + '</span>'
+    +   fillTag + countryTag + '</span>'
     + '<span class="spacer"></span>'
     + '<span class="none">' + esc(p.mode_desc || '') + '</span>'
     + '</div>'
@@ -782,6 +786,9 @@ async function openPool(id){
   const p = id ? (view.pools || []).find(x => x.id === id) : null;
   poolEdit = p ? p.id : '';
   poolMode = p ? p.mode : 'single';
+  poolCountries = p ? (p.preferred_countries || []).slice() : [];
+  renderPoolCountries(meta.countries || []);
+  $('#pocountrypanel').hidden = true;
   $('#poodlgtitle').textContent = p ? '编辑出口组' : '新建出口组';
   $('#poname').value = p ? p.name : '';
   $('#postep').value = p ? p.rr_step : (meta.rr_step || 5);
@@ -811,6 +818,21 @@ async function openPool(id){
   syncPoolSel();
 
   openModal('pooldlg');
+}
+
+function renderPoolCountries(list){
+  $('#pocountries').innerHTML = list.map(r =>
+      '<label><input type="checkbox" value="' + esc(r.code) + '"'
+      + (poolCountries.indexOf(r.code) >= 0 ? ' checked' : '') + '>'
+      + '<span class="h">' + esc(r.name || r.code) + '</span>'
+      + '<span class="n">' + esc(r.code) + ' · ' + num(r.available) + ' 个节点</span></label>'
+    ).join('') || '<div class="none">暂无可选国家</div>';
+  syncPoolCountries();
+}
+
+function syncPoolCountries(){
+  poolCountries = $$('#pocountries input:checked').map(i => i.value);
+  $('#pocsel').textContent = poolCountries.length ? '已选 ' + poolCountries.length + ' 国' : '不限';
 }
 
 function paintPoolMode(){
@@ -851,6 +873,10 @@ $('#pomode').addEventListener('click', e => {
   paintPoolMode();
 });
 $('#pohosts').addEventListener('change', syncPoolSel);
+$('#pocountries').addEventListener('change', syncPoolCountries);
+$('#pocountrybtn').onclick = () => {
+  $('#pocountrypanel').hidden = !$('#pocountrypanel').hidden;
+};
 $('#poofill').addEventListener('change', () => paintPoolFill($$('#pohosts input:checked').length));
 
 $('#posave').onclick = async () => {
@@ -868,7 +894,7 @@ $('#posave').onclick = async () => {
       body: JSON.stringify({
         id: poolEdit, name: $('#poname').value.trim(), mode: poolMode,
         rr_step: parseInt($('#postep').value, 10) || 5, hosts,
-        auto_fill: autoFill, size,
+        auto_fill: autoFill, size, preferred_countries: poolCountries,
       }),
     });
     toast(poolEdit ? '出口组已保存' : '出口组已创建', 'ok');

@@ -1482,13 +1482,22 @@ html[data-theme="dark"] .scr{background:rgba(0,0,0,.62)}
       </div>
 
       <div class="grp">
+        <div class="gl">首选国家 <span class="n" id="pocsel"></span></div>
+        <button class="btn sm" type="button" id="pocountrybtn">选择国家</button>
+        <div id="pocountrypanel" hidden style="margin-top:var(--sp-3)">
+          <div class="pb-list" id="pocountries"></div>
+          <div class="hint">自动补位优先保持首选国家至少占维持条数的 60%；首选国家节点不足时才新建同国家出口，超额非首选成员会被优先替换。</div>
+        </div>
+      </div>
+
+      <div class="grp">
         <label class="sw"><input type="checkbox" id="poofill"><span class="track"></span>
           <span>掉线自动补新出口</span></label>
         <div class="field" id="posizewrap" style="margin-top:var(--sp-3)"><label>维持可用条数</label>
           <input class="inp" id="posize" type="number" min="1" max="32" step="1" value="2"></div>
         <div class="hint" id="pofillhint">开着时组里哪条出口连不上，就用此刻在线的出口立刻顶上来（不限地区），
           在线的不够才新建一条；维持条数不会因为掉线变小。绑在它上面的节点链接不用重做。
-          槽位不够时先补能补的，并在组上写明还差几条。</div>
+          总出口最多 20 台；槽位不够时先补能补的，并在组上写明还差几条。</div>
       </div>
     </div>
     <div class="df">

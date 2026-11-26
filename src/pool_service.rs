@@ -10,12 +10,12 @@ use crate::{
     nodes::{new_socks_cred, node_supports_aead, validate_cred},
     panel_native::egress_tag,
     pools_logic::{
-        assess_pool_fill, canonical_pool_mode, creation_room, fill_avoid, fill_candidates,
-        fill_completion_note, fill_failure_reason, fill_slot, host_in_pool, load_pool_store,
-        parse_pool_seq, pool_reuse_pick, pool_view, retire_slot, target_key, PoolFillState,
-        PoolMember, PoolRuntimeState, POOL_FILL_INTERVAL, POOL_FILL_SLOT_FLOOR, POOL_FILL_WAIT_UP,
-        POOL_MODE_BALANCE, POOL_MODE_SINGLE, POOL_PROBE_INTERVAL, POOL_PROBE_TARGET,
-        POOL_TRY_TIMEOUT,
+        assess_pool_fill, canonical_pool_mode, country_fill_plan, country_is_preferred,
+        creation_room, fill_avoid, fill_candidates, fill_completion_note, fill_failure_reason,
+        fill_slot, host_in_pool, load_pool_store, parse_pool_seq, pool_reuse_pick, pool_view,
+        retire_slot, target_key, PoolFillState, PoolMember, PoolRuntimeState, POOL_FILL_INTERVAL,
+        POOL_FILL_SLOT_FLOOR, POOL_FILL_WAIT_UP, POOL_MODE_BALANCE, POOL_MODE_SINGLE,
+        POOL_PROBE_INTERVAL, POOL_PROBE_TARGET, POOL_TRY_TIMEOUT,
     },
     socks5::{serve_socks, DialNetwork, DialSocket, SocksDialer},
 };
@@ -756,7 +756,13 @@ impl PoolService {
             .fill
             .dead_snapshot(&pool.id);
         let members = self.resolve_members(&pool.id).await;
-        let assessment = assess_pool_fill(pool, &members, &mut first_dead, now);
+        let mut assessment = assess_pool_fill(pool, &members, &mut first_dead, now);
+        let country_plan = country_fill_plan(pool, &members);
+        assessment.need = assessment.need.max(
+            country_plan
+                .preferred_deficit
+                .min(country_plan.excess_nonpreferred.len()),
+        );
         {
             let mut state = lock_unpoisoned(&self.inner.state);
             let store = state.store.clone();
@@ -769,6 +775,12 @@ impl PoolService {
             return;
         }
 
+        let mut replacements = assessment.gone.clone();
+        for host in country_plan.excess_nonpreferred {
+            if !replacements.contains(&host) {
+                replacements.push(host);
+            }
+        }
         let tunnels = self.inner.manager.states().await;
         let candidates = {
             let state = lock_unpoisoned(&self.inner.state);
@@ -780,24 +792,54 @@ impl PoolService {
                 now,
             )
         };
-        let picks = pool_reuse_pick(&candidates, assessment.need);
-        let mut reused = 0;
-        for host in picks {
-            let old_host = fill_slot(&assessment.gone, reused).unwrap_or("");
-            if self.reuse_one(pool, old_host, &host).await {
-                reused += 1;
-            }
-        }
+        let preferred_slots = country_plan.preferred_deficit.min(assessment.need);
+        let preferred_candidates: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| {
+                country_is_preferred(&candidate.country_code, &pool.preferred_countries)
+            })
+            .cloned()
+            .collect();
+        let other_candidates: Vec<_> = candidates
+            .iter()
+            .filter(|candidate| {
+                !country_is_preferred(&candidate.country_code, &pool.preferred_countries)
+            })
+            .cloned()
+            .collect();
 
+        let other_slots = assessment.need.saturating_sub(preferred_slots);
+        let mut preferred_picks =
+            pool_reuse_pick(&preferred_candidates, preferred_slots).into_iter();
+        let mut other_picks = pool_reuse_pick(&other_candidates, other_slots).into_iter();
         let mut room = creation_room(
             self.inner
                 .manager
-                .max_slots
+                .exit_limit()
                 .saturating_sub(self.inner.manager.tunnels().await.len()),
         );
+        let mut reused = 0;
         let mut created = 0;
         let mut reason = None;
-        for index in 0..assessment.need.saturating_sub(reused) {
+        for index in 0..assessment.need {
+            let preferred_only = index < preferred_slots;
+            let old_host = fill_slot(&replacements, index).unwrap_or("");
+            let picks = if preferred_only {
+                &mut preferred_picks
+            } else {
+                &mut other_picks
+            };
+            let mut reused_here = false;
+            while let Some(host) = picks.next() {
+                if self.reuse_one(pool, old_host, &host).await {
+                    reused += 1;
+                    reused_here = true;
+                    break;
+                }
+            }
+            if reused_here {
+                continue;
+            }
             if room == 0 {
                 break;
             }
@@ -807,14 +849,13 @@ impl PoolService {
                 let state = lock_unpoisoned(&self.inner.state);
                 fill_avoid(&current_members, &state.fill.bad_until, Utc::now())
             };
-            let node = match self.pick_fill_node(&avoid).await {
+            let node = match self.pick_fill_node(pool, &avoid, preferred_only).await {
                 Ok(node) => node,
                 Err(err) => {
                     reason = Some(err.to_string());
                     break;
                 }
             };
-            let old_host = fill_slot(&assessment.gone, reused + created).unwrap_or("");
             match self.fill_one(pool, node, old_host).await {
                 Ok(()) => created += 1,
                 Err(host) => reason = Some(fill_failure_reason(&host)),
@@ -826,7 +867,12 @@ impl PoolService {
             .set_note(&pool.id, note);
     }
 
-    async fn pick_fill_node(&self, avoid: &HashSet<String>) -> Result<crate::models::Node> {
+    async fn pick_fill_node(
+        &self,
+        pool: &Pool,
+        avoid: &HashSet<String>,
+        preferred_only: bool,
+    ) -> Result<crate::models::Node> {
         self.inner.manager.ensure_nodes().await.ok();
         let nodes = self.inner.manager.node_list(false).await.0;
         let used: HashSet<_> = self
@@ -839,8 +885,22 @@ impl PoolService {
             .collect();
         nodes
             .into_iter()
-            .find(|node| !avoid.contains(&node.hostname) && !used.contains(&node.hostname))
-            .ok_or_else(|| anyhow!("挑不到可补位的空闲节点"))
+            .find(|node| {
+                !avoid.contains(&node.hostname)
+                    && !used.contains(&node.hostname)
+                    && (!preferred_only
+                        || country_is_preferred(&node.country_code, &pool.preferred_countries))
+            })
+            .ok_or_else(|| {
+                if preferred_only {
+                    anyhow!(
+                        "首选国家 {} 没有可补位的空闲节点",
+                        pool.preferred_countries.join("/")
+                    )
+                } else {
+                    anyhow!("挑不到可补位的空闲节点")
+                }
+            })
     }
 
     async fn reuse_one(&self, pool: &Pool, old_host: &str, host: &str) -> bool {
@@ -1018,6 +1078,8 @@ impl PoolService {
                         String::new()
                     },
                     slot: tunnel.map_or(0, |tunnel| tunnel.state.slot),
+                    country_code: tunnel
+                        .map_or_else(String::new, |tunnel| tunnel.state.node.country_code.clone()),
                     exit_ip: tunnel.map_or_else(String::new, |tunnel| tunnel.state.exit_ip.clone()),
                     up: tunnel.is_some_and(|tunnel| tunnel.state.status == "up"),
                     status: tunnel.map_or_else(String::new, |tunnel| tunnel.state.status.clone()),

@@ -88,7 +88,35 @@ web_port() {
 }
 
 public_ip() {
-  curl -s --max-time 6 http://api.ipify.org 2>/dev/null || echo "<本机IP>"
+  local ip
+  ip=$(ip -4 -o route get 1.1.1.1 2>/dev/null \
+    | sed -n 's/.*src \([0-9.][0-9.]*\).*/\1/p' | head -1)
+  if [[ -n $ip ]]; then
+    echo "$ip"
+    return
+  fi
+  ip=$(curl -s --connect-timeout 1 --max-time 2 http://api.ipify.org 2>/dev/null || true)
+  echo "${ip:-<本机IP>}"
+}
+
+web_ready() {
+  local port=$1 bp=$2 password=${3:-} base code
+  bp=${bp#/}; bp=${bp%/}
+  base="http://127.0.0.1:${port}"
+  [[ -n $bp ]] && base+="/${bp}"
+  for _ in $(seq 1 30); do
+    if [[ -n $password ]]; then
+      code=$(curl -sS -o /dev/null -w '%{http_code}' \
+        --connect-timeout 1 --max-time 2 \
+        --data-urlencode "password=$password" "$base/login" 2>/dev/null || true)
+    else
+      code=$(curl -sS -o /dev/null -w '%{http_code}' \
+        --connect-timeout 1 --max-time 2 "$base/login" 2>/dev/null || true)
+    fi
+    [[ $code == 200 ]] && return 0
+    sleep 1
+  done
+  return 1
 }
 
 pause() {
@@ -128,7 +156,7 @@ list_tunnels() {
   pw=$(cat "$WORK_DIR/password" 2>/dev/null)
   ck=$(mktemp)
 
-  curl -s --max-time 10 -c "$ck" -X POST -d "password=${pw}" \
+  curl -s --max-time 10 -c "$ck" -X POST --data-urlencode "password=${pw}" \
     "http://127.0.0.1:${port}/${bp}/login" -o /dev/null
   echo
   curl -s --max-time 10 -b "$ck" "http://127.0.0.1:${port}/${bp}/api/tunnels" \
@@ -164,7 +192,7 @@ change_port() {
   if ! [[ $new =~ ^[0-9]+$ ]] || (( new < 1 || new > 65535 )); then
     echo -e "  ${R}端口不合法${N}"; return
   fi
-  if ss -tln 2>/dev/null | grep -q ":${new} "; then
+  if ss -H -ltn "sport = :${new}" 2>/dev/null | grep -q .; then
     echo -e "  ${R}端口 ${new} 已被占用${N}"; return
   fi
   # 写 settings.json（权威来源），并把服务文件里可能残留的 -web 一并同步，
@@ -178,7 +206,15 @@ change_port() {
   sed -i "s/-web ${cur}/-web ${new}/" "$UNIT" 2>/dev/null
   svc_reload
   svc_restart
-  echo -e "  ${G}已改为 ${new} 并重启${N}"
+  local bp
+  bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
+  echo "  等待 Web 服务就绪..."
+  if web_ready "$new" "$bp"; then
+    echo -e "  ${G}已改为 ${new}，Web 已就绪${N}"
+  else
+    echo -e "  ${R}配置已写入，但 Web 未在 30 秒内就绪${N}"
+    svc_logs 20
+  fi
 }
 
 reset_password() {
@@ -191,25 +227,53 @@ reset_password() {
   umask 077
   echo "$pw" > "$WORK_DIR/password"
   svc_restart
-  echo -e "  ${G}新口令: ${pw}${N}"
+  local port bp
+  port=$(web_port)
+  bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
+  echo "  等待 Web 服务并验证新口令..."
+  if web_ready "$port" "$bp" "$pw"; then
+    echo -e "  ${G}新口令已生效: ${pw}${N}"
+  else
+    echo -e "  ${R}配置已写入，但新口令未通过登录验证${N}"
+    svc_logs 20
+  fi
 }
 
 reset_basepath() {
-  local bp
+  local bp port
   echo
   read -rp "  新访问路径 (留空则随机生成): " bp
-  if [[ -z $bp ]]; then
-    rm -f "$WORK_DIR/basepath"
-    svc_restart
-    sleep 2
-    bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
-  else
+  if [[ -n $bp ]]; then
     bp=${bp#/}; bp=${bp%/}
+    if ! [[ $bp =~ ^[A-Za-z0-9_-]*$ ]]; then
+      echo -e "  ${R}访问路径只能用字母、数字、- 和 _${N}"; return
+    fi
     umask 077
     echo "$bp" > "$WORK_DIR/basepath"
-    svc_restart
+  else
+    rm -f "$WORK_DIR/basepath"
   fi
-  echo -e "  ${G}新路径: /${bp}/${N}"
+  svc_restart
+  if [[ -z $bp ]]; then
+    for _ in $(seq 1 20); do
+      [[ -s "$WORK_DIR/basepath" ]] && break
+      sleep 1
+    done
+    bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
+    if [[ -z $bp ]]; then
+      echo -e "  ${R}服务没有生成新的访问路径${N}"
+      svc_logs 20
+      return
+    fi
+  fi
+  port=$(web_port)
+  echo "  等待 Web 服务就绪..."
+  if web_ready "$port" "$bp"; then
+    echo -e "  ${G}新路径已生效: /${bp}/${N}"
+  else
+    echo -e "  ${R}配置已写入，但 Web 未在 30 秒内就绪${N}"
+    svc_logs 20
+  fi
 }
 
 ipv6_state() {
@@ -298,6 +362,16 @@ do_update() {
   fi
   migrate_port_to_settings
   svc_start
+  local port bp
+  port=$(web_port)
+  bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
+  echo "  等待 Web 服务就绪..."
+  if ! web_ready "$port" "$bp"; then
+    echo -e "  ${R}新版已安装，但 Web 未在 30 秒内就绪${N}"
+    svc_logs 20
+    rm -rf "$tmp"
+    return
+  fi
   rm -rf "$tmp"
   echo -e "  ${G}已更新到 $("$BIN" -version 2>/dev/null)${N}"
 }

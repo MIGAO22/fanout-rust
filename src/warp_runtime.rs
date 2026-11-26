@@ -450,6 +450,7 @@ impl WarpService {
                             return;
                         }
                     };
+                    let _ = tunnel.runtime.stop().await;
                     manager.reconnect(tunnel.clone(), host).await;
                     let ns = Netns::new(self.instance.clone(), tunnel.slot);
                     if self.wait(&ns, tunnel.slot, Duration::from_secs(120)).await {

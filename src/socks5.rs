@@ -35,6 +35,7 @@ pub const REP_COMMAND_NOT_SUPPORTED: u8 = 0x07;
 
 pub const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(30);
 pub const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const RELAY_BUFFER_SIZE: usize = 32 * 1024;
 
 /// Errors whose text is part of the original Go implementation.
 #[derive(Debug)]
@@ -147,6 +148,7 @@ where
     D: SocksDialer + ?Sized,
 {
     let deadline = Instant::now() + NEGOTIATION_TIMEOUT;
+    let _ = client.set_nodelay(true);
 
     match timeout_at(deadline, socks_handshake(&mut client, cred)).await {
         Ok(result) => result?,
@@ -191,6 +193,7 @@ where
         }
     };
 
+    let _ = remote.set_nodelay(true);
     match timeout_at(deadline, socks_reply(&mut client, REP_SUCCESS)).await {
         Ok(Ok(())) => {}
         Ok(Err(err)) => return Err(err.into()),
@@ -345,9 +348,29 @@ where
 {
     let (mut a_read, mut a_write) = io::split(a);
     let (mut b_read, mut b_write) = io::split(b);
+    let mut client_buffer = vec![0_u8; RELAY_BUFFER_SIZE];
+    let mut remote_buffer = vec![0_u8; RELAY_BUFFER_SIZE];
     tokio::select! {
-        result = io::copy(&mut a_read, &mut b_write).map(|r| r.map(|_| ())) => result,
-        result = io::copy(&mut b_read, &mut a_write).map(|r| r.map(|_| ())) => result,
+        result = copy_relay_direction(&mut a_read, &mut b_write, &mut client_buffer) => result,
+        result = copy_relay_direction(&mut b_read, &mut a_write, &mut remote_buffer) => result,
+    }
+}
+
+async fn copy_relay_direction<R, W>(
+    mut reader: R,
+    mut writer: W,
+    buffer: &mut [u8],
+) -> io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    loop {
+        let count = reader.read(buffer).await?;
+        if count == 0 {
+            return Ok(());
+        }
+        writer.write_all(&buffer[..count]).await?;
     }
 }
 

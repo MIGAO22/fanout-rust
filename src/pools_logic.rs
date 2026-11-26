@@ -26,7 +26,7 @@ pub const GO_POOL_MODES: &[&str] = &[
 
 pub const POOL_TAG_PREFIX: &str = "pool-";
 pub const POOL_MAX_RR_STEP: usize = 1000;
-pub const POOL_TRY_TIMEOUT: Duration = Duration::from_secs(8);
+pub const POOL_TRY_TIMEOUT: Duration = Duration::from_secs(4);
 pub const POOL_AFFINITY_MAX: usize = 4096;
 pub const POOL_SWITCH_FLOOR: Duration = Duration::from_millis(600);
 pub const POOL_SWITCH_RATIO: u32 = 2;

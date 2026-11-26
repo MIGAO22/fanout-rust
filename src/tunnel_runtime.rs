@@ -2,13 +2,14 @@ use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use std::sync::Mutex as StdMutex;
 use std::{
+    collections::HashMap,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     net::TcpListener,
@@ -43,6 +44,53 @@ const EXIT_IP_ORACLES: &[&str] = &[
     "http://ifconfig.me/ip",
     "http://ipecho.net/plain",
 ];
+const DNS_CACHE_TTL: Duration = Duration::from_secs(60);
+const DNS_CACHE_LIMIT: usize = 4096;
+
+static DNS_CACHE: OnceLock<StdMutex<HashMap<String, (Vec<SocketAddr>, Instant)>>> = OnceLock::new();
+
+fn dns_cache() -> &'static StdMutex<HashMap<String, (Vec<SocketAddr>, Instant)>> {
+    DNS_CACHE.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+async fn resolve_ipv4_targets(addr: &str) -> Result<Vec<SocketAddr>> {
+    let (host, port) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("目标地址格式错误: {addr}"))?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| anyhow!("目标端口无效: {addr}"))?;
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        return Ok(vec![SocketAddr::from((ip, port))]);
+    }
+    if let Some(cached) = lock_unpoisoned(dns_cache())
+        .get(host)
+        .filter(|(_, at)| at.elapsed() < DNS_CACHE_TTL)
+        .map(|(addresses, _)| addresses.clone())
+    {
+        return Ok(cached);
+    }
+    let addresses = tokio::net::lookup_host((host, port))
+        .await
+        .with_context(|| format!("解析目标 {addr} 失败"))?
+        .filter(|address| matches!(address, SocketAddr::V4(_)))
+        .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        bail!("目标 {addr} 没有 IPv4 地址");
+    }
+    let mut cache = lock_unpoisoned(dns_cache());
+    if cache.len() >= DNS_CACHE_LIMIT {
+        cache.clear();
+    }
+    cache.insert(host.to_string(), (addresses.clone(), Instant::now()));
+    Ok(addresses)
+}
+
+fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 pub struct NetnsSocksDialer {
     dialer: NetnsDialer,
@@ -51,26 +99,27 @@ pub struct NetnsSocksDialer {
 #[async_trait]
 impl SocksDialer for NetnsSocksDialer {
     async fn dial(&self, network: DialNetwork, addr: &str) -> Result<DialSocket> {
-        let mut addrs = tokio::net::lookup_host(addr)
-            .await
-            .with_context(|| format!("解析目标 {addr} 失败"))?;
-        let target = addrs
-            .find(|a| matches!(a, SocketAddr::V4(_)))
-            .ok_or_else(|| anyhow!("目标 {addr} 没有 IPv4 地址"))?;
-        match network {
-            DialNetwork::Tcp => self
-                .dialer
-                .dial_tcp(target)
-                .await
-                .map(DialSocket::Tcp)
-                .map_err(Into::into),
-            DialNetwork::Udp => self
+        let targets = resolve_ipv4_targets(addr).await?;
+        if network == DialNetwork::Udp {
+            let target = targets
+                .first()
+                .copied()
+                .ok_or_else(|| anyhow!("目标 {addr} 没有 IPv4 地址"))?;
+            return self
                 .dialer
                 .dial_udp(target)
                 .await
                 .map(DialSocket::Udp)
-                .map_err(Into::into),
+                .map_err(Into::into);
         }
+        let mut last_error = None;
+        for target in targets {
+            match self.dialer.dial_tcp(target).await {
+                Ok(stream) => return Ok(DialSocket::Tcp(stream)),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow!("目标 {addr} 没有 IPv4 地址")))
     }
 }
 
@@ -427,4 +476,19 @@ impl TunnelFactory for LinuxTunnelFactory {
 
 pub fn has_default_route(output: &str) -> bool {
     route_has_default(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn numeric_targets_skip_dns_and_reject_bad_ports() {
+        let targets = resolve_ipv4_targets("1.2.3.4:443").await.unwrap();
+        assert_eq!(
+            targets,
+            vec![SocketAddr::from((Ipv4Addr::new(1, 2, 3, 4), 443))]
+        );
+        assert!(resolve_ipv4_targets("1.2.3.4:not-a-port").await.is_err());
+    }
 }

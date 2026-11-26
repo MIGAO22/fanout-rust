@@ -274,7 +274,19 @@ impl TunnelRuntime for LinuxTunnelRuntime {
                 .warp
                 .as_ref()
                 .ok_or_else(|| anyhow!("WARP 中转已开启，但注册服务未加载"))?;
-            Some(svc.setup(&self.netns, node).await?)
+            let account = svc.setup(&self.netns, node).await?;
+            if !svc
+                .wait(
+                    &self.netns,
+                    self.slot,
+                    crate::warp_runtime::WARP_HANDSHAKE_BUDGET,
+                )
+                .await
+            {
+                self.netns.teardown();
+                return Err(anyhow!("WARP 握手超时"));
+            }
+            Some(account)
         } else {
             None
         };

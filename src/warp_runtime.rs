@@ -27,6 +27,7 @@ const WARP_API_VER: &str = "v0a2317";
 const WARP_CLIENT_VERSION: &str = "2026.8.2115.0";
 const WARP_REGISTER_CONCURRENCY: usize = 2;
 const WARP_REGISTER_ATTEMPTS: usize = 5;
+pub const WARP_HANDSHAKE_BUDGET: Duration = Duration::from_secs(15);
 
 pub struct WarpService {
     dir: std::path::PathBuf,

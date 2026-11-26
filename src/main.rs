@@ -234,7 +234,19 @@ async fn main() -> Result<()> {
         state.clone(),
         auth::require_auth,
     ));
-    let app = Router::new().nest(&format!("/{basepath}"), app);
+    let app = if basepath.is_empty() {
+        app
+    } else {
+        let canonical = format!("/{basepath}");
+        let trailing = format!("{canonical}/");
+        Router::new().nest(&canonical, app).route(
+            &trailing,
+            get(move || {
+                let target = canonical.clone();
+                async move { axum::response::Redirect::permanent(&target) }
+            }),
+        )
+    };
 
     let addr: SocketAddr = settings.read().await.listen().parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -255,9 +267,12 @@ async fn main() -> Result<()> {
         let _ = tokio::signal::ctrl_c().await;
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await?;
     manager.shutdown().await;
     state.pools.close().await;
     Ok(())

@@ -2871,7 +2871,19 @@ impl std::fmt::Debug for ClientRuntime {
 
 impl ClientRuntime {
     pub fn detect() -> Self {
-        let mut runtime = Self::default();
+        let work_dir = env::var_os("FANOUT_WORK_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/var/lib/fanout"));
+        let backend = env::var("FANOUT_PANEL_MODE").unwrap_or_default();
+        Self::detect_with(&work_dir, &backend)
+    }
+
+    pub fn detect_with(work_dir: &Path, backend: &str) -> Self {
+        let mut runtime = Self {
+            work_dir: work_dir.to_path_buf(),
+            backend: backend.to_string(),
+            ..Self::default()
+        };
         match find_xray(&runtime.work_dir) {
             Ok(path) => runtime.xray_path = Some(path),
             Err(error) => runtime.xray_error = format!("{error:#}"),

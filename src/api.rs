@@ -453,8 +453,12 @@ pub struct ClientStatusQuery {
     pub check: Option<String>,
 }
 
-pub async fn client_status(Query(q): Query<ClientStatusQuery>) -> Response {
-    let runtime = crate::clients::ClientRuntime::detect();
+pub async fn client_status(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ClientStatusQuery>,
+) -> Response {
+    let runtime =
+        crate::clients::ClientRuntime::detect_with(&state.dir, &state.panel.current_mode());
     match crate::clients::client_bin_status_json(&runtime, q.check.as_deref() == Some("1")).await {
         Ok(v) => Json(v).into_response(),
         Err(e) => internal(e),

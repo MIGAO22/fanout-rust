@@ -159,10 +159,7 @@ async fn crud_preserves_listener_port_and_credentials_and_persists_changes() {
     assert!(service.delete_pool("p1").await.is_err());
     let mut closed = false;
     for _ in 0..20 {
-        if timeout(Duration::from_millis(100), TcpStream::connect(addr))
-            .await
-            .is_err()
-        {
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_err() {
             closed = true;
             break;
         }

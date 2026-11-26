@@ -12,8 +12,9 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, Notify, RwLock},
+    sync::{Mutex, RwLock},
 };
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::WebSettings,
@@ -85,7 +86,7 @@ pub struct LinuxTunnelRuntime {
     proc: Mutex<Option<OvpnProc>>,
     listener: Mutex<Option<Arc<TcpListener>>>,
     accepting: AtomicBool,
-    stop_notify: Arc<Notify>,
+    stop: Mutex<CancellationToken>,
     dead: Arc<StdMutex<Option<String>>>,
 }
 
@@ -113,14 +114,18 @@ impl LinuxTunnelRuntime {
             proc: Mutex::new(None),
             listener: Mutex::new(None),
             accepting: AtomicBool::new(false),
-            stop_notify: Arc::new(Notify::new()),
+            stop: Mutex::new(CancellationToken::new()),
             dead: Arc::new(StdMutex::new(None)),
         }
     }
 
     async fn stop_old(&self) {
         self.accepting.store(false, Ordering::Release);
-        self.stop_notify.notify_one();
+        {
+            let mut stop = self.stop.lock().await;
+            stop.cancel();
+            *stop = CancellationToken::new();
+        }
         self.listener.lock().await.take();
         if let Some(p) = self.proc.lock().await.take() {
             p.kill();
@@ -164,7 +169,7 @@ impl LinuxTunnelRuntime {
         let cred = self.cred.clone();
         let accepting = Arc::new(AtomicBool::new(true));
         self.accepting.store(true, Ordering::Release);
-        let stop = self.stop_notify.clone();
+        let stop = self.stop.lock().await.clone();
         tokio::spawn(async move {
             loop {
                 if !accepting.load(Ordering::Acquire) {
@@ -177,7 +182,7 @@ impl LinuxTunnelRuntime {
                         let d = dialer.clone();
                         tokio::spawn(async move { let _ = serve_socks(stream, Some(&c), d.as_ref()).await; });
                     }
-                    _ = stop.notified() => break,
+                    _ = stop.cancelled() => break,
                 }
             }
         });

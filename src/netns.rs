@@ -22,9 +22,7 @@ use tokio::{
 
 use crate::{
     instance::Instance,
-    process::{
-        combined_output_command, output_command, run_command, run_formatted, run_quiet, OvpnProc,
-    },
+    process::{combined_output_command, output_command, run_formatted, run_quiet, OvpnProc},
     util::write_file,
 };
 
@@ -228,9 +226,9 @@ impl Netns {
         }
 
         let cidr = self.subnet_cidr();
-        ensure_rule("nat", "POSTROUTING", &["-s", &cidr, "-j", "MASQUERADE"]);
-        ensure_rule_insert("filter", "FORWARD", &["-s", &cidr, "-j", "ACCEPT"]);
-        ensure_rule_insert("filter", "FORWARD", &["-d", &cidr, "-j", "ACCEPT"]);
+        ensure_rule("nat", "POSTROUTING", &["-s", &cidr, "-j", "MASQUERADE"])?;
+        ensure_rule_insert("filter", "FORWARD", &["-s", &cidr, "-j", "ACCEPT"])?;
+        ensure_rule_insert("filter", "FORWARD", &["-d", &cidr, "-j", "ACCEPT"])?;
         Ok(())
     }
 
@@ -278,34 +276,46 @@ fn strings<'a>(parts: impl AsRef<[&'a str]>) -> Vec<String> {
         .collect()
 }
 
-fn ensure_rule(table: &str, chain: &str, spec: &[&str]) {
-    ensure_rule_impl(table, chain, None, spec);
+fn ensure_rule(table: &str, chain: &str, spec: &[&str]) -> Result<()> {
+    ensure_rule_impl(table, chain, None, spec)
 }
 
-fn ensure_rule_insert(table: &str, chain: &str, spec: &[&str]) {
-    ensure_rule_impl(table, chain, Some("1"), spec);
+fn ensure_rule_insert(table: &str, chain: &str, spec: &[&str]) -> Result<()> {
+    ensure_rule_impl(table, chain, Some("1"), spec)
 }
 
-fn ensure_rule_impl(table: &str, chain: &str, insert_at: Option<&str>, spec: &[&str]) {
-    let mut check = strings(&["-w", "5", "-t", table, "-C", chain]);
-    check.extend(spec.iter().map(|part| (*part).to_string()));
-    let mut command = std::process::Command::new("iptables");
-    command
-        .args(&check)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if run_command(&mut command).is_ok() {
-        return;
-    }
+fn ensure_rule_impl(
+    table: &str,
+    chain: &str,
+    insert_at: Option<&str>,
+    spec: &[&str],
+) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 0..6 {
+        let mut check = strings(&["-w", "5", "-t", table, "-C", chain]);
+        check.extend(spec.iter().map(|part| (*part).to_string()));
+        if run_formatted("iptables", &check).is_ok() {
+            return Ok(());
+        }
 
-    let mut args = strings(&["-w", "5", "-t", table]);
-    if let Some(position) = insert_at {
-        args.extend(strings(&["-I", chain, position]));
-    } else {
-        args.extend(strings(&["-A", chain]));
+        let mut args = strings(&["-w", "5", "-t", table]);
+        if let Some(position) = insert_at {
+            args.extend(strings(&["-I", chain, position]));
+        } else {
+            args.extend(strings(&["-A", chain]));
+        }
+        args.extend(spec.iter().map(|part| (*part).to_string()));
+        match run_formatted("iptables", &args) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < 6 {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+        }
     }
-    args.extend(spec.iter().map(|part| (*part).to_string()));
-    run_quiet("iptables", &args);
+    Err(last_error.unwrap_or_else(|| anyhow!("iptables 规则写入失败")))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -603,7 +613,10 @@ fn connect_tcp<A: ToSocketAddrs + Send + 'static>(
             return Err(io::Error::new(io::ErrorKind::TimedOut, "TCP 拨号超时"));
         }
         match StdTcpStream::connect_timeout(&address, remaining) {
-            Ok(stream) => return Ok(stream),
+            Ok(stream) => {
+                stream.set_nonblocking(true)?;
+                return Ok(stream);
+            }
             Err(error) => last_error = Some(error),
         }
     }
@@ -627,6 +640,7 @@ fn connect_udp<A: ToSocketAddrs + Send + 'static>(
         .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "目标没有 IPv4 地址"))?;
     let socket = StdUdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     socket.connect(&address)?;
+    socket.set_nonblocking(true)?;
     Ok(socket)
 }
 

@@ -377,7 +377,7 @@ pub fn pool_mode_desc(mode: &str) -> &'static str {
     match mode {
         "single" => "咬住一条，不通才换组内下一条",
         "roundrobin" => "每 N 个新目标换一条",
-        "latency" => "按实测拨号延迟挑最快的",
+        "latency" => "在延迟接近的最快出口间轮换，避免单条过载",
         "race" => "同时向组内所有可用出口发起，谁先通用谁",
         _ => "",
     }

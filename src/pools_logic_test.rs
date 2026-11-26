@@ -104,23 +104,21 @@ fn round_robin_uses_steps_and_wraps() {
 }
 
 #[test]
-fn affinity_keeps_targets_stable_for_round_robin_and_balance() {
-    for mode in [POOL_MODE_ROUND_ROBIN, POOL_MODE_BALANCE, POOL_MODE_LATENCY] {
-        let mut policy = PoolPolicy::new(mode, 1);
-        let members = [
-            up_member("a", Duration::ZERO),
-            up_member("b", Duration::ZERO),
-        ];
-        let first = first_host(&policy.pick("example.com", &members)).to_string();
-        for _ in 0..6 {
-            policy.pick("other.com", &members);
-            assert_eq!(first_host(&policy.pick("example.com", &members)), first);
-        }
+fn affinity_keeps_targets_stable_for_round_robin() {
+    let mut policy = PoolPolicy::new(POOL_MODE_ROUND_ROBIN, 1);
+    let members = [
+        up_member("a", Duration::ZERO),
+        up_member("b", Duration::ZERO),
+    ];
+    let first = first_host(&policy.pick("example.com", &members)).to_string();
+    for _ in 0..6 {
+        policy.pick("other.com", &members);
+        assert_eq!(first_host(&policy.pick("example.com", &members)), first);
     }
 }
 
 #[test]
-fn balance_switches_only_when_the_sticky_exit_is_much_slower() {
+fn balance_spreads_similar_latency_members_and_rejects_slow_tail() {
     let mut policy = PoolPolicy::new(POOL_MODE_BALANCE, 1);
     let slow = up_member("slow", Duration::from_secs(2));
     let fast = up_member("fast", Duration::from_millis(50));
@@ -133,11 +131,13 @@ fn balance_switches_only_when_the_sticky_exit_is_much_slower() {
     let mut policy = PoolPolicy::new(POOL_MODE_BALANCE, 1);
     let a = up_member("a", Duration::from_millis(100));
     let b = up_member("b", Duration::from_millis(40));
-    assert_eq!(
-        first_host(&policy.pick("t0", std::slice::from_ref(&a))),
-        "a"
-    );
-    assert_eq!(first_host(&policy.pick("t0", &[a, b])), "a");
+    let tail = up_member("tail", Duration::from_secs(2));
+    let members = [a, b, tail];
+    let picked: Vec<_> = (0..6)
+        .map(|_| first_host(&policy.pick("same-target", &members)).to_string())
+        .collect();
+    assert_eq!(picked, ["a", "b", "a", "b", "a", "b"]);
+    assert!(!picked.iter().any(|host| host == "tail"));
 }
 
 #[test]

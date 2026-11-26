@@ -31,6 +31,7 @@ pub const POOL_AFFINITY_MAX: usize = 4096;
 pub const POOL_TARGET_STATS_MAX: usize = 4096;
 pub const POOL_SWITCH_FLOOR: Duration = Duration::from_millis(600);
 pub const POOL_SWITCH_RATIO: u32 = 2;
+pub const POOL_BALANCE_SPREAD_FLOOR: Duration = Duration::from_millis(100);
 pub const POOL_EWMA_ALPHA: f64 = 0.3;
 pub const POOL_COOL_BASE: Duration = Duration::from_secs(10);
 pub const POOL_COOL_MAX: Duration = Duration::from_secs(180);
@@ -318,6 +319,7 @@ pub struct PoolPolicy {
     pub step: usize,
     current: String,
     cursor: usize,
+    balance_cursor: usize,
     affinity: HashMap<String, String>,
     affinity_order: Vec<String>,
 }
@@ -329,6 +331,7 @@ impl PoolPolicy {
             step: if step < 1 { POOL_DEFAULT_RR_STEP } else { step },
             current: String::new(),
             cursor: 0,
+            balance_cursor: 0,
             affinity: HashMap::new(),
             affinity_order: Vec::new(),
         }
@@ -382,6 +385,15 @@ impl PoolPolicy {
             };
         }
 
+        if mode == Some(POOL_MODE_BALANCE) {
+            let chosen = self.pick_balance(&available);
+            self.bind(target, &chosen);
+            return PoolChoice {
+                order: with_cold(&chosen),
+                concurrent: false,
+            };
+        }
+
         if let Some(host) = self.affinity.get(target).cloned() {
             if let Some(member) = member_of(&available, &host) {
                 if self.still_sticky(member, &available) {
@@ -410,6 +422,39 @@ impl PoolPolicy {
             order: with_cold(&chosen),
             concurrent: false,
         }
+    }
+
+    fn pick_balance(&mut self, available: &[PoolMember]) -> String {
+        let unknown: Vec<_> = available
+            .iter()
+            .filter(|member| member.latency.is_zero())
+            .cloned()
+            .collect();
+        let mut measured: Vec<_> = available
+            .iter()
+            .filter(|member| !member.latency.is_zero())
+            .collect();
+        measured.sort_by(|a, b| a.latency.cmp(&b.latency));
+        let candidates = if !unknown.is_empty() {
+            unknown
+        } else if measured.is_empty() {
+            available.to_vec()
+        } else {
+            let best = measured[0].latency;
+            let limit = best.saturating_add(POOL_BALANCE_SPREAD_FLOOR);
+            let mut close: Vec<_> = available
+                .iter()
+                .filter(|member| !member.latency.is_zero() && member.latency <= limit)
+                .cloned()
+                .collect();
+            if close.is_empty() {
+                close.push(measured[0].clone());
+            }
+            close
+        };
+        let index = self.balance_cursor % candidates.len();
+        self.balance_cursor = self.balance_cursor.wrapping_add(1);
+        candidates[index].host.clone()
     }
 
     fn still_sticky(&self, member: &PoolMember, available: &[PoolMember]) -> bool {
@@ -461,6 +506,7 @@ impl PoolPolicy {
         self.step = if step < 1 { POOL_DEFAULT_RR_STEP } else { step };
         self.current.clear();
         self.cursor = 0;
+        self.balance_cursor = 0;
     }
 
     pub fn affinity(&self) -> &HashMap<String, String> {

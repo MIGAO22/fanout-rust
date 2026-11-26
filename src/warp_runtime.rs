@@ -1,8 +1,7 @@
 use anyhow::{bail, Context, Result};
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{path::Path, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     io::AsyncWriteExt,
-    process::Stdio,
     sync::{Mutex, RwLock, Semaphore},
 };
 

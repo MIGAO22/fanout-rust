@@ -1,6 +1,7 @@
 mod api;
 mod appstate;
 mod auth;
+mod clients;
 mod config;
 mod factory;
 mod hoststats;
@@ -12,9 +13,12 @@ mod netns;
 mod nodecache;
 mod nodes;
 mod panel;
+mod panel_api;
 mod panel_native;
+mod panel_runtime;
 mod panel_xcl;
 mod panel_xui;
+mod pool_service;
 mod pools_logic;
 mod process;
 mod publicip;
@@ -145,12 +149,23 @@ async fn main() -> Result<()> {
             warp: Some(warp.clone()),
         }),
     );
+    let pools = Arc::new(pool_service::PoolService::new(dir.clone(), manager.clone()).await?);
+    let panels = panel_runtime::PanelManager::with_mode(
+        dir.clone(),
+        manager.clone(),
+        pools.clone(),
+        args.panel.as_deref().unwrap_or(""),
+    )
+    .await;
+    manager.set_panel(panels.clone());
     let state = Arc::new(appstate::AppState {
         auth,
         manager: manager.clone(),
         dir: dir.clone(),
         basepath: basepath.clone(),
         warp,
+        panel: panels.clone(),
+        pools,
     });
     if let Err(e) = manager.restore().await {
         tracing::warn!("恢复隧道状态失败: {e}");
@@ -158,6 +173,13 @@ async fn main() -> Result<()> {
     let health_manager = manager.clone();
     tokio::spawn(async move {
         health_manager.health_loop().await;
+    });
+    let pool_probe = state.pools.clone();
+    tokio::spawn(async move {
+        loop {
+            pool_probe.probe_stale().await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
     });
 
     if !tag.is_empty() {
@@ -185,48 +207,40 @@ async fn main() -> Result<()> {
         .route("/api/jobs", get(api::jobs))
         .route("/api/jobs/dismiss", get(api::job_dismiss))
         .route("/api/pools", get(api::pools))
+        .route("/api/pool/save", post(api::pool_save))
+        .route("/api/pool/delete", post(api::pool_delete))
+        .route("/api/pool/cred", post(api::pool_cred))
         .route("/api/warp", get(api::warp_get).post(api::warp_set))
         .route("/api/stats", get(api::stats))
         .route("/api/client/status", get(api::client_status))
-        .route("/api/xui", get(api::xui_status))
+        .route("/api/client/xray/apply", post(api::client_xray_apply))
+        .route("/api/client/openvpn/apply", post(api::client_openvpn_apply))
+        .route("/api/client/openvpn/repo", post(api::client_openvpn_repo))
+        .route("/api/client/openvpn/build", post(api::client_openvpn_build))
+        .route(
+            "/api/client/openvpn/source",
+            post(api::client_openvpn_source),
+        )
         .route("/sub", get(api::subscription))
         .route("/api/settings", get(api::settings).post(api::settings))
         .route("/api/sub", get(api::sub_info))
         .route("/api/sub/reset", post(api::sub_reset))
-        .route("/api/update/check", get(api::update_check));
+        .route("/api/update/check", get(api::update_check))
+        .route("/api/update/apply", post(api::update_apply));
 
-    for path in [
-        "/api/client/warp/apply",
-        "/api/xui/inbounds",
-        "/api/xui/bind",
-        "/api/xui/clone",
-        "/api/xui/detail",
-        "/api/xui/links",
-        "/api/xui/delete",
-        "/api/pool/save",
-        "/api/pool/delete",
-        "/api/pool/cred",
-        "/api/panel/inbound/new",
-        "/api/panel/inbound/update",
-        "/api/panel/client/add",
-        "/api/panel/client/del",
-        "/api/panel/client/reset",
-        "/api/panel/mode",
-        "/api/update/apply",
-        "/api/client/xray/apply",
-        "/api/client/openvpn/apply",
-        "/api/client/openvpn/repo",
-        "/api/client/openvpn/build",
-        "/api/client/openvpn/source",
-    ] {
+    for path in ["/api/client/warp/apply"] {
         app = app.route(path, get(api::not_implemented).post(api::not_implemented));
     }
-    let app = app
-        .with_state(state.clone())
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth::require_auth,
-        ));
+    let app = app.with_state(state.clone());
+    let app = app.merge(panel_api::panel_routes(
+        panels.clone(),
+        state.manager.clone(),
+        state.pools.clone(),
+    ));
+    let app = app.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        auth::require_auth,
+    ));
     let app = Router::new().nest(&format!("/{basepath}"), app);
 
     let addr: SocketAddr = settings.read().await.listen().parse()?;
@@ -252,5 +266,6 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown)
         .await?;
     manager.shutdown().await;
+    state.pools.close().await;
     Ok(())
 }

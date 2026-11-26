@@ -29,13 +29,14 @@ pub async fn health() -> impl IntoResponse {
 
 pub async fn exits(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let m = &state.manager;
+    let panel = state.panel.status().await;
     Json(ExitsView {
         exits: m.exits().await,
         direct: Vec::new(),
-        pools: Vec::new(),
+        pools: state.pools.views().await,
         panel: Vec::new(),
-        backend: "native".into(),
-        panel_info: "fanout-rust 自建 Xray".into(),
+        backend: panel.kind.unwrap_or_else(|| "native".into()),
+        panel_info: panel.describe.unwrap_or_default(),
         public_ip: crate::publicip::host_public_ip(),
         warp: warp_overview(&state).await,
     })
@@ -183,8 +184,103 @@ pub async fn job_dismiss(
     Json(json!({"ok": true}))
 }
 
-pub async fn pools() -> impl IntoResponse {
-    Json(json!({"pools": [], "modes": [], "rr_step": 5, "max_hosts": 32}))
+pub async fn pools(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let modes: Vec<_> = crate::models::POOL_MODES
+        .iter()
+        .map(|mode| {
+            json!({
+                "mode": mode,
+                "label": crate::models::pool_mode_label(mode),
+                "desc": crate::models::pool_mode_desc(mode)
+            })
+        })
+        .collect();
+    Json(json!({
+        "pools": state.pools.views().await,
+        "modes": modes,
+        "rr_step": crate::models::POOL_DEFAULT_RR_STEP,
+        "max_hosts": crate::models::POOL_MAX_HOSTS
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct PoolSaveReq {
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    pub mode: String,
+    #[serde(default)]
+    pub rr_step: usize,
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub auto_fill: bool,
+    #[serde(default)]
+    pub size: usize,
+}
+
+pub async fn pool_save(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PoolSaveReq>,
+) -> Response {
+    let pool = crate::models::Pool {
+        id: req.id,
+        name: req.name,
+        mode: req.mode,
+        hosts: req.hosts,
+        rr_step: req.rr_step,
+        port: 0,
+        cred: crate::models::SocksCred::default(),
+        auto_fill: req.auto_fill,
+        size: req.size,
+    };
+    match state.pools.set_pool(pool).await {
+        Ok(p) => Json(json!({"id": p.id, "name": p.name})).into_response(),
+        Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PoolDeleteReq {
+    pub id: String,
+}
+
+pub async fn pool_delete(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PoolDeleteReq>,
+) -> Response {
+    match state.pools.delete_pool(&req.id).await {
+        Ok(()) => Json(json!({"ok": true, "unbound": []})).into_response(),
+        Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PoolCredReq {
+    pub id: String,
+    #[serde(default)]
+    pub user: String,
+    #[serde(default)]
+    pub pass: String,
+}
+
+pub async fn pool_cred(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PoolCredReq>,
+) -> Response {
+    match state
+        .pools
+        .set_cred(
+            &req.id,
+            crate::models::SocksCred {
+                user: req.user,
+                pass: req.pass,
+            },
+        )
+        .await
+    {
+        Ok(c) => Json(json!({"user": c.user, "pass": c.pass})).into_response(),
+        Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
+    }
 }
 
 async fn warp_overview(state: &AppState) -> WarpOverview {
@@ -242,14 +338,69 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
-pub async fn client_status() -> impl IntoResponse {
-    Json(json!({
-        "backend": "native", "path": "", "current": "", "openvpn": "", "latest": "",
-        "has_update": false, "updatable": false, "openvpn_updatable": false,
-        "openvpn_has_update": false, "warp_enabled": false, "warp_ready": false,
-        "warp_need_tools": false, "warp_has_update": false, "warp_count": 0,
-        "warp_stale": 0, "warp_can_apply": false
-    }))
+#[derive(Deserialize)]
+pub struct ClientStatusQuery {
+    pub check: Option<String>,
+}
+
+pub async fn client_status(Query(q): Query<ClientStatusQuery>) -> Response {
+    let runtime = crate::clients::ClientRuntime::detect();
+    match crate::clients::client_bin_status_json(&runtime, q.check.as_deref() == Some("1")).await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+pub async fn client_xray_apply() -> Response {
+    match crate::clients::apply_xray_update().await {
+        Ok(msg) => Json(json!({"ok": true, "message": msg})).into_response(),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+pub async fn client_openvpn_apply() -> Response {
+    match crate::clients::apply_openvpn_update().await {
+        Ok(msg) => Json(json!({"ok": true, "message": msg})).into_response(),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct OffQuery {
+    pub off: Option<String>,
+}
+
+pub async fn client_openvpn_repo(Query(q): Query<OffQuery>) -> Response {
+    if q.off.as_deref() != Some("1") {
+        return error(StatusCode::BAD_REQUEST, "这个接口只负责撤销官方源");
+    }
+    if !crate::clients::openvpn_apt_repo_ours() {
+        return Json(json!({"ok": true, "message": "fanout 名下没有官方源文件"})).into_response();
+    }
+    match crate::clients::remove_openvpn_apt_repo() {
+        Ok(()) => Json(json!({"ok": true, "message": "已删掉 fanout 写的官方源和签名钥匙"}))
+            .into_response(),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+pub async fn client_openvpn_build() -> Response {
+    match crate::clients::start_openvpn_source_build().await {
+        Ok(job) => Json(json!({"ok": true, "job": job.view().await.id,
+            "message": "已在后台开始编译，进度在这张卡和出口页的作业卡片里"}))
+        .into_response(),
+        Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+pub async fn client_openvpn_source(Query(q): Query<OffQuery>) -> Response {
+    if q.off.as_deref() != Some("1") {
+        return error(StatusCode::BAD_REQUEST, "这个接口只负责撤销源码版");
+    }
+    match crate::clients::remove_openvpn_source_build() {
+        Ok(msg) => Json(json!({"ok": true, "message": msg})).into_response(),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 
 pub async fn xui_status() -> impl IntoResponse {
@@ -385,12 +536,25 @@ pub async fn subscription(
     }
 }
 
-pub async fn update_check() -> impl IntoResponse {
-    Json(json!({
-        "current": env!("CARGO_PKG_VERSION"),
-        "latest": env!("CARGO_PKG_VERSION"),
-        "has_update": false,
-        "notes": "",
-        "url": "https://github.com/MIGAO22/fanout-rust/releases/latest"
-    }))
+pub async fn update_check() -> Response {
+    match crate::clients::check_update().await {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => error(StatusCode::BAD_GATEWAY, e.to_string()),
+    }
+}
+
+pub async fn update_apply() -> Response {
+    match crate::clients::check_update().await {
+        Ok(st) if !st.has_update => {
+            Json(json!({"ok": true, "restarting": false, "message": "已经是最新版"}))
+                .into_response()
+        }
+        Ok(st) => match crate::clients::apply_update().await {
+            Ok(()) => {
+                Json(json!({"ok": true, "restarting": true, "latest": st.latest})).into_response()
+            }
+            Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        },
+        Err(e) => error(StatusCode::BAD_GATEWAY, e.to_string()),
+    }
 }

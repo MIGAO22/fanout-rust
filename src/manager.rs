@@ -242,6 +242,9 @@ impl Manager {
             .find(|s| !tunnels.contains_key(s))
             .ok_or_else(|| anyhow!("槽位已满"))?;
         let mut ports: HashSet<u16> = tunnels.values().map(|t| t.port).collect();
+        for p in crate::pool_service::pool_ports() {
+            ports.insert(p);
+        }
         drop(tunnels);
         for _ in 0..200 {
             let p = rand::random::<u16>() % 40000 + 20000;

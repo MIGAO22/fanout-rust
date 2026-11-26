@@ -21,7 +21,10 @@ use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
-    sync::{atomic::{AtomicBool, Ordering}, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -30,9 +33,9 @@ use tokio::sync::Mutex;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+pub use crate::models::UpdateStatus;
 use crate::models::{ClientBinStatus, JobStep, JobView};
 use crate::util::{atomic_write, first_line, one_line, path_string, random_token, write_file};
-pub use crate::models::UpdateStatus;
 
 #[cfg(test)]
 #[path = "clients_test.rs"]
@@ -41,7 +44,7 @@ mod tests;
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const XRAY_RELEASE_REPO: &str = "XTLS/Xray-core";
 pub const OPENVPN_RELEASE_REPO: &str = "OpenVPN/openvpn";
-pub const UPDATE_REPO: &str = "MIGAO22/fanout";
+pub const UPDATE_REPO: &str = "MIGAO22/fanout-rust";
 pub const OS_RELEASE_PATH: &str = "/etc/os-release";
 
 pub const OVPN_APT_BASE: &str = "https://build.openvpn.net/debian/openvpn";
@@ -79,24 +82,47 @@ static OVPN_BUILD_ON: AtomicBool = AtomicBool::new(false);
 
 // ───────────────────────── releases and self-update ─────────────────────────
 
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseAsset {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub name: String,
-    #[serde(rename = "browser_download_url")]
+    #[serde(
+        rename = "browser_download_url",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
     pub url: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub digest: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseInfo {
-    #[serde(rename = "tag_name")]
+    #[serde(
+        rename = "tag_name",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
     pub tag_name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub name: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub body: String,
-    #[serde(rename = "html_url")]
+    #[serde(
+        rename = "html_url",
+        default,
+        deserialize_with = "deserialize_null_default"
+    )]
     pub html_url: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub assets: Vec<ReleaseAsset>,
 }
 
@@ -247,13 +273,24 @@ pub async fn download_file(url: &str, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_http_text(url: &str, user_agent: &str, timeout: Duration, limit: usize) -> Result<String> {
-    let client = Client::builder().timeout(timeout).user_agent(user_agent).build()?;
+async fn fetch_http_text(
+    url: &str,
+    user_agent: &str,
+    timeout: Duration,
+    limit: usize,
+) -> Result<String> {
+    let client = Client::builder()
+        .timeout(timeout)
+        .user_agent(user_agent)
+        .build()?;
     let mut response = client.get(url).send().await?;
     if response.status() != reqwest::StatusCode::OK {
         bail!("HTTP {}", response.status().as_u16());
     }
-    if response.content_length().is_some_and(|length| length > limit as u64) {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
         bail!("索引超过 {limit} 字节上限");
     }
     let mut body = Vec::new();
@@ -295,9 +332,13 @@ where
         bail!("最新版里找不到适配 {arch} 的包");
     }
 
-    let temporary = tempfile::Builder::new().prefix("fanout-update-").tempdir()?;
+    let temporary = tempfile::Builder::new()
+        .prefix("fanout-update-")
+        .tempdir()?;
     let tar_path = temporary.path().join(&asset_name);
-    download_file(&asset_url, &tar_path).await.context("下载失败")?;
+    download_file(&asset_url, &tar_path)
+        .await
+        .context("下载失败")?;
     if !sums_url.is_empty() {
         verify_checksum(&tar_path, &asset_name, &sums_url).await?;
     }
@@ -325,7 +366,9 @@ pub async fn verify_checksum(path: &Path, name: &str, sums_url: &str) -> Result<
         .parent()
         .ok_or_else(|| anyhow!("包路径没有父目录"))?
         .join("checksums.txt");
-    download_file(sums_url, &sums).await.context("下载校验和失败")?;
+    download_file(sums_url, &sums)
+        .await
+        .context("下载校验和失败")?;
     let expected = sha256_from_list(&sums, name)?;
     let actual = sha256_file(path)?;
     if !expected.eq_ignore_ascii_case(&actual) {
@@ -395,11 +438,15 @@ pub fn copy_file_mode(source: &Path, destination: &Path, mode: u32) -> Result<()
 
 pub fn restart_self() {
     if has_cmd("systemctl") && dir_exists(Path::new("/run/systemd/system")) {
-        let _ = Command::new("systemctl").args(["restart", "fanout"]).spawn();
+        let _ = Command::new("systemctl")
+            .args(["restart", "fanout"])
+            .spawn();
         return;
     }
     if has_cmd("rc-service") {
-        let _ = Command::new("rc-service").args(["fanout", "restart"]).spawn();
+        let _ = Command::new("rc-service")
+            .args(["fanout", "restart"])
+            .spawn();
         return;
     }
     tracing::info!("fanout: 已替换二进制，但未检测到 systemd/openrc，请手动重启服务");
@@ -477,7 +524,8 @@ pub fn parse_xray_version(output: &str) -> String {
 }
 
 pub fn parse_openvpn_version(output: &str) -> String {
-    let fields: Vec<_> = first_line(output).split_whitespace().collect();
+    let first = first_line(output);
+    let fields: Vec<_> = first.split_whitespace().collect();
     if fields.len() >= 2 && fields[0].to_ascii_lowercase().starts_with("openvpn") {
         fields[1].to_string()
     } else {
@@ -487,7 +535,10 @@ pub fn parse_openvpn_version(output: &str) -> String {
 
 pub fn probe_version(name: &str, args: &[String]) -> String {
     let mut command = Command::new(name);
-    command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     match capture_output(command, Duration::from_secs(8)) {
         Ok(output) => combined_output(&output),
         Err(_) => String::new(),
@@ -497,7 +548,10 @@ pub fn probe_version(name: &str, args: &[String]) -> String {
 pub fn xray_update_target(work_dir: &Path, bin: &str, backend: &str) -> (String, String) {
     let owned = work_dir.join("bin").join("xray");
     match backend {
-        "" => (String::new(), "还没定下用哪种节点后端，等探测完成后再看".into()),
+        "" => (
+            String::new(),
+            "还没定下用哪种节点后端，等探测完成后再看".into(),
+        ),
         "native" => {
             if bin.trim().is_empty() {
                 (String::new(), "自建模式下没找到 Xray 可执行文件".into())
@@ -650,7 +704,12 @@ pub async fn apply_xray_update_with(runtime: &ClientRuntime) -> Result<String> {
     let release = fetch_release_latest(XRAY_RELEASE_REPO)
         .await
         .with_context(|| format!("查 {XRAY_RELEASE_REPO} 最新版失败"))?;
-    let want = release.tag_name.trim().strip_prefix('v').unwrap_or("").to_string();
+    let want = release
+        .tag_name
+        .trim()
+        .strip_prefix('v')
+        .unwrap_or("")
+        .to_string();
     if want.is_empty() {
         bail!("{XRAY_RELEASE_REPO} 最新版返回了一个空版本号");
     }
@@ -685,7 +744,9 @@ pub async fn apply_xray_update_with(runtime: &ClientRuntime) -> Result<String> {
     replacement?;
     let message = format!("Xray 已从 {} 升到 {want}", or_unknown(&from));
     if runtime.native_reloader.is_none() {
-        Ok(format!("{message}。当前没有自建 Xray 在跑，下次重载配置时生效"))
+        Ok(format!(
+            "{message}。当前没有自建 Xray 在跑，下次重载配置时生效"
+        ))
     } else {
         let previous = sibling_path(&target, ".prev");
         Ok(format!(
@@ -734,15 +795,18 @@ pub fn parse_os_release(blob: &str) -> HashMap<String, String> {
 
 pub fn distro_family(values: &HashMap<String, String>) -> String {
     for field in ["ID_LIKE", "ID"] {
-        for name in values.get(field).map(String::as_str).unwrap_or_default().split_whitespace() {
+        for name in values
+            .get(field)
+            .map(String::as_str)
+            .unwrap_or_default()
+            .split_whitespace()
+        {
             match name.to_ascii_lowercase().as_str() {
                 "debian" | "ubuntu" => return "deb".into(),
                 "fedora" | "rhel" | "centos" | "rocky" | "almalinux" | "amzn" | "ol" => {
                     return "rpm".into()
                 }
-                "suse" | "opensuse-tumbleweed" | "opensuse-leap" | "sles" => {
-                    return "suse".into()
-                }
+                "suse" | "opensuse-tumbleweed" | "opensuse-leap" | "sles" => return "suse".into(),
                 "alpine" => return "alpine".into(),
                 "arch" | "manjaro" | "endeavouros" => return "arch".into(),
                 _ => {}
@@ -763,7 +827,10 @@ fn plan_error(family: &str, message: impl Into<String>) -> OpenVPNPlanError {
     }
 }
 
-pub fn openvpn_upgrade_plan<F>(os_release: &str, have: F) -> OpenVPNPlanResult<(Vec<Vec<String>>, String)>
+pub fn openvpn_upgrade_plan<F>(
+    os_release: &str,
+    have: F,
+) -> OpenVPNPlanResult<(Vec<Vec<String>>, String)>
 where
     F: Fn(&str) -> bool,
 {
@@ -772,7 +839,10 @@ where
     let steps = match family.as_str() {
         "deb" => {
             if !have("apt-get") {
-                return Err(plan_error("deb", "认出来是 Debian/Ubuntu 系，但机器上没有 apt-get"));
+                return Err(plan_error(
+                    "deb",
+                    "认出来是 Debian/Ubuntu 系，但机器上没有 apt-get",
+                ));
             }
             vec![
                 argv(&["apt-get", "update", "-qq"]),
@@ -785,7 +855,10 @@ where
             } else if have("yum") {
                 vec![argv(&["yum", "-y", "update", "openvpn"])]
             } else {
-                return Err(plan_error("rpm", "认出来是 RHEL/CentOS/Fedora 系，但机器上没有 dnf 或 yum"));
+                return Err(plan_error(
+                    "rpm",
+                    "认出来是 RHEL/CentOS/Fedora 系，但机器上没有 dnf 或 yum",
+                ));
             }
         }
         "alpine" => {
@@ -805,7 +878,10 @@ where
         }
         "suse" => {
             if !have("zypper") {
-                return Err(plan_error("suse", "认出来是 openSUSE 系，但机器上没有 zypper"));
+                return Err(plan_error(
+                    "suse",
+                    "认出来是 openSUSE 系，但机器上没有 zypper",
+                ));
             }
             vec![
                 argv(&["zypper", "--non-interactive", "refresh"]),
@@ -815,7 +891,9 @@ where
         _ => {
             return Err(plan_error(
                 "",
-                format!("认不出这台机器的发行版（{OS_RELEASE_PATH} 里没有已支持的 ID），请手动升级 openvpn"),
+                format!(
+                "认不出这台机器的发行版（{OS_RELEASE_PATH} 里没有已支持的 ID），请手动升级 openvpn"
+            ),
             ))
         }
     };
@@ -839,7 +917,10 @@ where
     let (refresh, query) = match family {
         "deb" => {
             if !have("apt-cache") {
-                return Err(plan_error("deb", "机器上没有 apt-cache，问不到仓库里的版本"));
+                return Err(plan_error(
+                    "deb",
+                    "机器上没有 apt-cache，问不到仓库里的版本",
+                ));
             }
             (
                 have("apt-get").then(|| argv(&["apt-get", "update", "-qq"])),
@@ -855,14 +936,20 @@ where
                     argv(&["yum", "-q", "list", "openvpn"]),
                 )
             } else {
-                return Err(plan_error("rpm", "机器上没有 dnf 或 yum，问不到仓库里的版本"));
+                return Err(plan_error(
+                    "rpm",
+                    "机器上没有 dnf 或 yum，问不到仓库里的版本",
+                ));
             }
         }
         "alpine" => {
             if !have("apk") {
                 return Err(plan_error("alpine", "机器上没有 apk，问不到仓库里的版本"));
             }
-            (Some(argv(&["apk", "update"])), argv(&["apk", "policy", "openvpn"]))
+            (
+                Some(argv(&["apk", "update"])),
+                argv(&["apk", "policy", "openvpn"]),
+            )
         }
         "arch" => {
             if !have("pacman") {
@@ -882,7 +969,12 @@ where
                 argv(&["zypper", "-n", "info", "openvpn"]),
             )
         }
-        _ => return Err(plan_error("", "认不出这台机器的包管理器，问不到仓库里的版本")),
+        _ => {
+            return Err(plan_error(
+                "",
+                "认不出这台机器的包管理器，问不到仓库里的版本",
+            ))
+        }
     };
     Ok((refresh, query))
 }
@@ -917,11 +1009,18 @@ where
         Ok(output) => output,
         Err(error) => {
             if stale {
-                return RepoLatest { why, stale, ..RepoLatest::default() };
+                return RepoLatest {
+                    why,
+                    stale,
+                    ..RepoLatest::default()
+                };
             }
             if looks_locked(&error) {
                 return RepoLatest {
-                    why: format!("{} 正被别的进程占用（自动更新常在跑），仓库版本号问不到", query[0]),
+                    why: format!(
+                        "{} 正被别的进程占用（自动更新常在跑），仓库版本号问不到",
+                        query[0]
+                    ),
                     ..RepoLatest::default()
                 };
             }
@@ -944,9 +1043,17 @@ where
             "alpine" => "apk 的仓库索引里没有 openvpn 这个包".to_string(),
             _ => "包管理器没给出 openvpn 的版本号".to_string(),
         };
-        RepoLatest { why, stale, ..RepoLatest::default() }
+        RepoLatest {
+            why,
+            stale,
+            ..RepoLatest::default()
+        }
     } else {
-        RepoLatest { version, why, stale }
+        RepoLatest {
+            version,
+            why,
+            stale,
+        }
     }
 }
 
@@ -959,7 +1066,7 @@ pub fn parse_apt_candidate(output: &str) -> String {
         if key != "Candidate" {
             continue;
         }
-        let version = rest.trim().trim_matches('()');
+        let version = rest.trim().trim_matches(&['(', ')'][..]);
         return if version.is_empty() || version == "none" {
             String::new()
         } else {
@@ -1047,7 +1154,7 @@ pub fn tail_lines(output: &str, count: usize) -> String {
     lines.join("\n").trim().to_string()
 }
 
-pub fn looks_locked(error: &dyn std::error::Error) -> bool {
+pub fn looks_locked(error: &anyhow::Error) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     [
         "could not get lock",
@@ -1059,7 +1166,7 @@ pub fn looks_locked(error: &dyn std::error::Error) -> bool {
     .any(|marker| message.contains(marker))
 }
 
-pub fn refresh_why(command: &str, error: &dyn std::error::Error) -> String {
+pub fn refresh_why(command: &str, error: &anyhow::Error) -> String {
     if looks_locked(error) {
         format!("{command} 正被别的进程占用（自动更新常在跑），索引没刷新，仓库版本号可能偏旧")
     } else {
@@ -1083,7 +1190,10 @@ pub fn run_repo_query(args: &[String], timeout: Duration) -> Result<String> {
         bail!("空命令");
     }
     let mut command = Command::new(&args[0]);
-    command.args(&args[1..]).env("LANG", "C").env("DEBIAN_FRONTEND", "noninteractive");
+    command
+        .args(&args[1..])
+        .env("LANG", "C")
+        .env("DEBIAN_FRONTEND", "noninteractive");
     let output = capture_output(command, timeout)?;
     let combined = combined_output(&output);
     if !output.status.success() {
@@ -1097,7 +1207,11 @@ pub fn run_upgrade_steps(steps: &[Vec<String>]) -> Result<()> {
 }
 
 pub fn run_upgrade_steps_within(steps: &[Vec<String>], budget: Duration) -> Result<()> {
-    let deadline = if budget.is_zero() { None } else { Some(Instant::now() + budget) };
+    let deadline = if budget.is_zero() {
+        None
+    } else {
+        Some(Instant::now() + budget)
+    };
     for step in steps {
         let left = match deadline {
             Some(deadline) => {
@@ -1111,7 +1225,11 @@ pub fn run_upgrade_steps_within(steps: &[Vec<String>], budget: Duration) -> Resu
         };
         let (output, result) = run_package_cmd_within(step, left);
         if let Err(error) = result {
-            bail!("{} 失败: {error:#}\n{}", step.join(" "), tail_lines(&output, 8));
+            bail!(
+                "{} 失败: {error:#}\n{}",
+                step.join(" "),
+                tail_lines(&output, 8)
+            );
         }
     }
     Ok(())
@@ -1125,7 +1243,11 @@ pub fn run_package_cmd_within(args: &[String], budget: Duration) -> (String, Res
     if args.is_empty() {
         return (String::new(), Err(anyhow!("空命令")));
     }
-    let timeout = if budget.is_zero() { PACKAGE_COMMAND_TIMEOUT } else { budget };
+    let timeout = if budget.is_zero() {
+        PACKAGE_COMMAND_TIMEOUT
+    } else {
+        budget
+    };
     let mut command = Command::new(&args[0]);
     command
         .args(&args[1..])
@@ -1196,7 +1318,10 @@ pub fn valid_deb_codename(codename: &str) -> bool {
 
 pub fn deb_codename(values: &HashMap<String, String>) -> String {
     for key in ["VERSION_CODENAME", "UBUNTU_CODENAME"] {
-        let value = values.get(key).map(|value| value.trim().to_ascii_lowercase()).unwrap_or_default();
+        let value = values
+            .get(key)
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_default();
         if valid_deb_codename(&value) {
             return value;
         }
@@ -1205,7 +1330,10 @@ pub fn deb_codename(values: &HashMap<String, String>) -> String {
 }
 
 pub fn deb_stable_version(version: &str) -> (String, bool) {
-    let upstream = version.rsplit_once('-').map(|(before, _)| before).unwrap_or(version);
+    let upstream = version
+        .rsplit_once('-')
+        .map(|(before, _)| before)
+        .unwrap_or(version);
     if upstream.is_empty() || upstream.contains(['~', ':']) {
         return (String::new(), false);
     }
@@ -1239,15 +1367,28 @@ pub async fn fetch_deb_packages(url: &str) -> Result<String> {
     fetch_http_text(url, "fanout-clientbin", Duration::from_secs(20), 24 << 20).await
 }
 
-pub fn ovpn_apt_repo_ver<F>(codename: &str, arch: &str, have: &str, mut fetch: F) -> (String, String, String)
+pub fn ovpn_apt_repo_ver<F>(
+    codename: &str,
+    arch: &str,
+    have: &str,
+    mut fetch: F,
+) -> (String, String, String)
 where
     F: FnMut(&str) -> Result<String>,
 {
     if !valid_deb_codename(codename) {
-        return (String::new(), String::new(), "/etc/os-release 里没有能用的发行版代号，不去接第三方源".into());
+        return (
+            String::new(),
+            String::new(),
+            "/etc/os-release 里没有能用的发行版代号，不去接第三方源".into(),
+        );
     }
     if arch.is_empty() {
-        return (String::new(), String::new(), "OpenVPN 官方源没有本机这个 CPU 架构的构建".into());
+        return (
+            String::new(),
+            String::new(),
+            "OpenVPN 官方源没有本机这个 CPU 架构的构建".into(),
+        );
     }
     let mut official = String::new();
     let mut channel = String::new();
@@ -1268,7 +1409,11 @@ where
         }
     }
     if official.is_empty() {
-        return (String::new(), String::new(), format!("OpenVPN 官方源没有 {codename}/{arch} 的稳定版构建"));
+        return (
+            String::new(),
+            String::new(),
+            format!("OpenVPN 官方源没有 {codename}/{arch} 的稳定版构建"),
+        );
     }
     if !version_less(have, &official) {
         return (
@@ -1280,7 +1425,12 @@ where
     (channel, official, String::new())
 }
 
-pub fn openvpn_pick_target(have: &str, repo_version: &str, official: &str, official_channel: &str) -> (String, String) {
+pub fn openvpn_pick_target(
+    have: &str,
+    repo_version: &str,
+    official: &str,
+    official_channel: &str,
+) -> (String, String) {
     let better = |version: &str| !version.is_empty() && version_less(have, version);
     if better(official) && (!better(repo_version) || version_less(repo_version, official)) {
         (official.to_string(), official_channel.to_string())
@@ -1297,7 +1447,12 @@ pub fn ovpn_apt_repo_line(channel: &str, arch: &str, codename: &str) -> String {
     )
 }
 
-fn ovpn_apt_repo_line_with(files: &AptRepoFiles, channel: &str, arch: &str, codename: &str) -> String {
+fn ovpn_apt_repo_line_with(
+    files: &AptRepoFiles,
+    channel: &str,
+    arch: &str,
+    codename: &str,
+) -> String {
     format!(
         "deb [arch={arch} signed-by={}] {OVPN_APT_BASE}/{channel} {codename} main\n",
         files.keyring.display()
@@ -1313,7 +1468,11 @@ pub fn openvpn_apt_repo_wired_with(files: &AptRepoFiles) -> bool {
     if let Some(parent) = files.sources.parent() {
         if let Ok(entries) = fs::read_dir(parent) {
             for entry in entries.flatten() {
-                if entry.path().extension().is_some_and(|extension| extension == "list") {
+                if entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "list")
+                {
                     candidates.push(entry.path());
                 }
             }
@@ -1330,7 +1489,11 @@ pub fn openvpn_apt_repo_has_channel(channel: &str, codename: &str) -> bool {
     openvpn_apt_repo_has_channel_with(&AptRepoFiles::default(), channel, codename)
 }
 
-pub fn openvpn_apt_repo_has_channel_with(files: &AptRepoFiles, channel: &str, codename: &str) -> bool {
+pub fn openvpn_apt_repo_has_channel_with(
+    files: &AptRepoFiles,
+    channel: &str,
+    codename: &str,
+) -> bool {
     fs::read_to_string(&files.sources)
         .map(|blob| blob.contains(&format!("{OVPN_APT_BASE}/{channel} {codename} main")))
         .unwrap_or(false)
@@ -1365,7 +1528,11 @@ pub async fn install_openvpn_apt_repo(channel: &str, arch: &str, codename: &str)
         channel,
         arch,
         codename,
-        |url, destination| async move { download_file(url, destination).await },
+        |url, destination| {
+            let url = url.to_string();
+            let destination = destination.to_path_buf();
+            async move { download_file(&url, &destination).await }
+        },
     )
     .await
 }
@@ -1386,9 +1553,9 @@ where
         .keyring
         .parent()
         .ok_or_else(|| anyhow!("钥匙路径没有父目录"))?;
-    fs::create_dir_all(directory)
-        .with_context(|| format!("建 {} 失败", directory.display()))?;
+    fs::create_dir_all(directory).with_context(|| format!("建 {} 失败", directory.display()))?;
     let temporary = directory.join(format!(".fanout-openvpn-key-{}.tmp", uuid::Uuid::new_v4()));
+    let temporary_guard = RemoveFileOnDrop(temporary.clone());
     let result = async {
         download(&files.key_url, &temporary)
             .await
@@ -1412,7 +1579,7 @@ where
         Ok(())
     }
     .await;
-    let _ = fs::remove_file(&temporary);
+    drop(temporary_guard);
     result
 }
 
@@ -1535,16 +1702,21 @@ where
         let values = parse_os_release(os_release);
         decision.codename = deb_codename(&values);
         decision.arch = arch.to_string();
-        let (channel, official, why) = ovpn_apt_repo_ver(&decision.codename, &decision.arch, have, fetch);
+        let (channel, official, why) =
+            ovpn_apt_repo_ver(&decision.codename, &decision.arch, have, fetch);
         decision.official = official;
         decision.official_why = why;
         decision.channel = channel;
         decision.wired = wired();
     }
-    (decision.target, decision.channel) =
-        openvpn_pick_target(have, &decision.repo_version, &decision.official, &decision.channel);
-    decision.needs_write = !decision.channel.is_empty()
-        && !has_channel(&decision.channel, &decision.codename);
+    (decision.target, decision.channel) = openvpn_pick_target(
+        have,
+        &decision.repo_version,
+        &decision.official,
+        &decision.channel,
+    );
+    decision.needs_write =
+        !decision.channel.is_empty() && !has_channel(&decision.channel, &decision.codename);
     decision
 }
 
@@ -1561,7 +1733,9 @@ pub async fn decide_openvpn_upgrade(os_release: &str, have: &str) -> OpenVPNDeci
                 let url = format!(
                     "{OVPN_APT_BASE}/{channel}/dists/{codename}/main/binary-{arch}/Packages"
                 );
-                let result = fetch_deb_packages(&url).await.map_err(|error| format!("{error:#}"));
+                let result = fetch_deb_packages(&url)
+                    .await
+                    .map_err(|error| format!("{error:#}"));
                 pages.insert(url, result);
             }
         }
@@ -1587,7 +1761,9 @@ pub async fn apply_openvpn_update() -> Result<String> {
     let _guard = OPENVPN_APPLY_LOCK.lock().await;
     let before = parse_openvpn_version(&probe_version("openvpn", &["--version".into()]));
     if before.is_empty() {
-        bail!("本机没有可用的 openvpn，先在系统里装一个（apt/apk install openvpn）再回来点这个按钮");
+        bail!(
+            "本机没有可用的 openvpn，先在系统里装一个（apt/apk install openvpn）再回来点这个按钮"
+        );
     }
     let mut shadow = String::new();
     if let Some(record) = read_openvpn_src_record() {
@@ -1648,12 +1824,19 @@ pub fn or_fallback<'a>(value: &'a str, fallback: &'a str) -> &'a str {
 // ───────────────────────── OpenVPN verified source builds ─────────────────────────
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct OpenVPNSourceBuild {
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub version: String,
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub prefix: String,
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub bin: String,
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub sha256: String,
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub signer: String,
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub built_at: String,
 }
 
@@ -1664,14 +1847,14 @@ pub fn ovpn_src_version_ok(version: &str) -> bool {
     let parts: Vec<_> = version.split('.').collect();
     parts.len() == 3
         && parts.iter().all(|part| {
-            !part.is_empty()
-                && part.len() <= 4
-                && part.bytes().all(|byte| byte.is_ascii_digit())
+            !part.is_empty() && part.len() <= 4 && part.bytes().all(|byte| byte.is_ascii_digit())
         })
 }
 
 fn is_hex_lower(value: &str) -> bool {
-    value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 pub fn ovpn_src_is_sha256(value: &str) -> bool {
@@ -1698,7 +1881,10 @@ pub fn ovpn_src_build_dir(version: &str) -> String {
     format!("{OVPN_SRC_STATE_DIR}/build-{version}")
 }
 
-pub fn ovpn_src_assets(release: Option<&ReleaseInfo>, version: &str) -> Result<(String, String, String)> {
+pub fn ovpn_src_assets(
+    release: Option<&ReleaseInfo>,
+    version: &str,
+) -> Result<(String, String, String)> {
     let release = release.ok_or_else(|| anyhow!("没有拿到 release"))?;
     if !ovpn_src_version_ok(version) {
         bail!("版本号 {version:?} 不能用来拼下载路径");
@@ -1715,7 +1901,11 @@ pub fn ovpn_src_assets(release: Option<&ReleaseInfo>, version: &str) -> Result<(
                     bail!("源码包地址不像官方 release：{}", asset.url);
                 }
                 tar_url = asset.url.clone();
-                digest = asset.digest.strip_prefix("sha256:").unwrap_or(&asset.digest).to_ascii_lowercase();
+                digest = asset
+                    .digest
+                    .strip_prefix("sha256:")
+                    .unwrap_or(&asset.digest)
+                    .to_ascii_lowercase();
             }
             name if name == format!("{tar_name}.asc") => {
                 if !asset.url.starts_with(&official_prefix) {
@@ -1750,7 +1940,9 @@ pub fn ovpn_src_make_jobs(cpus: usize) -> usize {
 }
 
 pub fn available_parallelism() -> usize {
-    thread::available_parallelism().map(usize::from).unwrap_or(1)
+    thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
 }
 
 pub fn ovpn_src_deps(family: &str) -> Vec<Vec<String>> {
@@ -1804,11 +1996,17 @@ pub fn gpg_signer_fingerprint(status: &str) -> String {
             }
         }
     }
-    if good { fingerprint } else { String::new() }
+    if good {
+        fingerprint
+    } else {
+        String::new()
+    }
 }
 
 pub fn ovpn_src_pinned_signer(fingerprint: &str) -> bool {
-    OVPN_SRC_SIGNERS.iter().any(|pinned| pinned.eq_ignore_ascii_case(fingerprint))
+    OVPN_SRC_SIGNERS
+        .iter()
+        .any(|pinned| pinned.eq_ignore_ascii_case(fingerprint))
 }
 
 pub fn gpg_sig_primary_fingerprint(status: &str) -> String {
@@ -1889,9 +2087,18 @@ pub fn gpg_run(timeout: Duration, args: &[String]) -> (String, Result<()>) {
     if let Err(error) = fs::create_dir_all(OVPN_SRC_GNU_DIR) {
         return (String::new(), Err(error.into()));
     }
+    if let Err(error) = set_permissions(Path::new(OVPN_SRC_GNU_DIR), 0o700) {
+        return (String::new(), Err(error));
+    }
     let mut command = Command::new("gpg");
     command
-        .args(["--homedir", OVPN_SRC_GNU_DIR, "--batch", "--no-tty", "--quiet"])
+        .args([
+            "--homedir",
+            OVPN_SRC_GNU_DIR,
+            "--batch",
+            "--no-tty",
+            "--quiet",
+        ])
         .args(args)
         .env("LANG", "C");
     let output = match capture_output(command, timeout) {
@@ -1922,19 +2129,29 @@ pub async fn verify_openvpn_tarball(tar_path: &Path, asc_path: &Path) -> Result<
     download_file(&key_url, Path::new(OVPN_SRC_KEY_FILE))
         .await
         .with_context(|| "下载 OpenVPN 签名公钥失败")?;
-    let (output, result) = gpg_run(Duration::from_secs(60), &[ "--import".into(), OVPN_SRC_KEY_FILE.into() ]);
+    let (output, result) = gpg_run(
+        Duration::from_secs(60),
+        &["--import".into(), OVPN_SRC_KEY_FILE.into()],
+    );
     if let Err(error) = result {
         bail!("导入 OpenVPN 签名公钥失败：{error:#}；{output}");
     }
     let (colons, result) = gpg_run(
         Duration::from_secs(60),
-        &[ "--with-colons".into(), "--list-keys".into(), "--with-subkey-fingerprints".into() ],
+        &[
+            "--with-colons".into(),
+            "--list-keys".into(),
+            "--with-subkey-fingerprints".into(),
+        ],
     );
     if let Err(error) = result {
         bail!("列出签名公钥失败：{error:#}；{colons}");
     }
     let fingerprints = gpg_key_fingerprints(&colons);
-    if !fingerprints.iter().any(|fingerprint| ovpn_src_pinned_signer(fingerprint)) {
+    if !fingerprints
+        .iter()
+        .any(|fingerprint| ovpn_src_pinned_signer(fingerprint))
+    {
         bail!(
             "下载到的钥匙指纹里没有钉住的那把（期望 {}，实际 {fingerprints:?}）——不敢用它验包",
             OVPN_SRC_SIGNERS[0]
@@ -1942,21 +2159,36 @@ pub async fn verify_openvpn_tarball(tar_path: &Path, asc_path: &Path) -> Result<
     }
     let (status, result) = gpg_run(
         Duration::from_secs(120),
-        &[ "--status-fd".into(), "1".into(), "--verify".into(), path_string(asc_path), path_string(tar_path) ],
+        &[
+            "--status-fd".into(),
+            "1".into(),
+            "--verify".into(),
+            path_string(asc_path),
+            path_string(tar_path),
+        ],
     );
     if let Err(error) = result {
-        bail!("openvpn 源码包验签没通过：{}；{error:#}", first_line(&status));
+        bail!(
+            "openvpn 源码包验签没通过：{}；{error:#}",
+            first_line(&status)
+        );
     }
     let signer = gpg_signer_fingerprint(&status);
     if signer.is_empty() {
         bail!("验签输出里没有 GOODSIG/VALIDSIG，看不出是谁签的");
     }
-    if !fingerprints.iter().any(|fingerprint| fingerprint.eq_ignore_ascii_case(&signer)) {
+    if !fingerprints
+        .iter()
+        .any(|fingerprint| fingerprint.eq_ignore_ascii_case(&signer))
+    {
         bail!("签名用的子钥匙 {signer} 不属于钉住的那把主钥匙，拒绝这份包");
     }
     let primary = gpg_sig_primary_fingerprint(&status);
     if !primary.is_empty() && !ovpn_src_pinned_signer(&primary) {
-        bail!("签名挂在主钥匙 {primary} 上，不是钉住的 {}", OVPN_SRC_SIGNERS[0]);
+        bail!(
+            "签名挂在主钥匙 {primary} 上，不是钉住的 {}",
+            OVPN_SRC_SIGNERS[0]
+        );
     }
     Ok(signer)
 }
@@ -1983,7 +2215,9 @@ pub const B_STEP_MAKE: usize = 7;
 pub const B_STEP_INSTALL: usize = 8;
 
 pub fn ovpn_build_start() -> bool {
-    OVPN_BUILD_ON.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+    OVPN_BUILD_ON
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
 }
 
 pub fn ovpn_build_finish() {
@@ -2006,7 +2240,10 @@ pub struct SourceBuildJob {
 impl SourceBuildJob {
     pub fn new(version: &str) -> Self {
         let now: DateTime<Utc> = Utc::now();
-        let labels: Vec<String> = OPENVPN_BUILD_STEPS.iter().map(|label| (*label).to_string()).collect();
+        let labels: Vec<String> = OPENVPN_BUILD_STEPS
+            .iter()
+            .map(|label| (*label).to_string())
+            .collect();
         let total = labels.len();
         let view = JobView {
             id: random_token(12),
@@ -2024,7 +2261,9 @@ impl SourceBuildJob {
             done: now,
             total,
         };
-        Self { inner: Arc::new(Mutex::new(view)) }
+        Self {
+            inner: Arc::new(Mutex::new(view)),
+        }
     }
 
     pub async fn set(&self, index: usize, status: &str, detail: &str) {
@@ -2054,16 +2293,23 @@ pub async fn start_openvpn_source_build() -> Result<SourceBuildJob> {
     if !ovpn_build_start() {
         bail!("已经有一个编译在跑了，等它结束");
     }
+    let build_guard = SourceBuildLockGuard;
     let prepared = async {
         let release = fetch_release_latest(OPENVPN_RELEASE_REPO).await?;
         let (version, stable) = release_tag(&release.tag_name);
         if !stable || !ovpn_src_version_ok(&version) {
-            bail!("OpenVPN 官方最新 tag {:?} 不是能编译的三位版本号", release.tag_name);
+            bail!(
+                "OpenVPN 官方最新 tag {:?} 不是能编译的三位版本号",
+                release.tag_name
+            );
         }
         let (tar_url, asc_url, digest) = ovpn_src_assets(Some(&release), &version)?;
         if let Some(record) = read_openvpn_src_record() {
             if record.version == version {
-                bail!("openvpn {version} 已经编好在用了（{}），不用重复编", record.bin);
+                bail!(
+                    "openvpn {version} 已经编好在用了（{}），不用重复编",
+                    record.bin
+                );
             }
         }
         Ok((version, tar_url, asc_url, digest))
@@ -2071,15 +2317,12 @@ pub async fn start_openvpn_source_build() -> Result<SourceBuildJob> {
     .await;
     let (version, tar_url, asc_url, digest) = match prepared {
         Ok(prepared) => prepared,
-        Err(error) => {
-            ovpn_build_finish();
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
     let job = SourceBuildJob::new(&version);
     let background = job.clone();
     tokio::spawn(async move {
-        let _build_guard = SourceBuildLockGuard;
+        let _build_guard = build_guard;
         run_openvpn_source_build(&background, &version, &tar_url, &asc_url, &digest).await;
     });
     Ok(job)
@@ -2102,38 +2345,84 @@ pub async fn run_openvpn_source_build(
     }
 
     if !ovpn_src_version_ok(version) || !ovpn_src_is_sha256(digest) {
-        fail_step!(job, version, B_STEP_DIGEST, "版本号或 GitHub 摘要形状不合法");
+        fail_step!(
+            job,
+            version,
+            B_STEP_DIGEST,
+            "版本号或 GitHub 摘要形状不合法"
+        );
     }
     let old = read_openvpn_src_record();
     job.set(B_STEP_REPO, "running", "").await;
     let os_release = match fs::read_to_string(OS_RELEASE_PATH) {
         Ok(blob) => blob,
-        Err(error) => fail_step!(job, version, B_STEP_REPO, "读 {} 失败：{error:#}", OS_RELEASE_PATH),
+        Err(error) => fail_step!(
+            job,
+            version,
+            B_STEP_REPO,
+            "读 {} 失败：{error:#}",
+            OS_RELEASE_PATH
+        ),
     };
     let apt_version = parse_openvpn_version(&probe_version("openvpn", &["--version".into()]));
     if apt_version.is_empty() {
-        fail_step!(job, version, B_STEP_REPO, "本机没有可用的 openvpn，先按系统包装一个再回来");
+        fail_step!(
+            job,
+            version,
+            B_STEP_REPO,
+            "本机没有可用的 openvpn，先按系统包装一个再回来"
+        );
     }
     let decision = decide_openvpn_upgrade(&os_release, &apt_version).await;
     if !decision.why.is_empty() {
         fail_step!(job, version, B_STEP_REPO, "{}", decision.why);
     }
     if decision.family != "deb" {
-        fail_step!(job, version, B_STEP_REPO, "{} 家族的编译依赖包名各家不同，这条只给 Debian / Ubuntu 用", decision.family);
+        fail_step!(
+            job,
+            version,
+            B_STEP_REPO,
+            "{} 家族的编译依赖包名各家不同，这条只给 Debian / Ubuntu 用",
+            decision.family
+        );
     }
     if !decision.target.is_empty() && !version_less(&decision.target, version) {
-        fail_step!(job, version, B_STEP_REPO, "包管理器就能装到 {}（不比官方 {} 旧），请用「升级 openvpn」那个按钮", decision.target, version);
+        fail_step!(
+            job,
+            version,
+            B_STEP_REPO,
+            "包管理器就能装到 {}（不比官方 {} 旧），请用「升级 openvpn」那个按钮",
+            decision.target,
+            version
+        );
     }
     job.set(
         B_STEP_REPO,
         "ok",
-        &format!("{} 家族装得到的最高是 {}，官方 {} 够不到", decision.family, or_nothing(&decision.target), version),
-    ).await;
+        &format!(
+            "{} 家族装得到的最高是 {}，官方 {} 够不到",
+            decision.family,
+            or_nothing(&decision.target),
+            version
+        ),
+    )
+    .await;
 
-    job.set(B_STEP_DEPS, "running", "apt-get update && apt-get install 编译依赖").await;
+    job.set(
+        B_STEP_DEPS,
+        "running",
+        "apt-get update && apt-get install 编译依赖",
+    )
+    .await;
     let dependencies = ovpn_src_deps(&decision.family);
     if dependencies.is_empty() {
-        fail_step!(job, version, B_STEP_DEPS, "{} 家族没有给定的依赖包名表", decision.family);
+        fail_step!(
+            job,
+            version,
+            B_STEP_DEPS,
+            "{} 家族没有给定的依赖包名表",
+            decision.family
+        );
     }
     if let Err(error) = run_upgrade_steps(&dependencies) {
         fail_step!(job, version, B_STEP_DEPS, "{error:#}");
@@ -2158,7 +2447,8 @@ pub async fn run_openvpn_source_build(
     if let Err(error) = download_file(asc_url, &asc_path).await {
         fail_step!(job, version, B_STEP_DOWNLOAD, "下载签名失败：{error:#}");
     }
-    job.set(B_STEP_DOWNLOAD, "ok", &format!("{tar_name} + .asc")).await;
+    job.set(B_STEP_DOWNLOAD, "ok", &format!("{tar_name} + .asc"))
+        .await;
 
     job.set(B_STEP_DIGEST, "running", "").await;
     let got = match sha256_file(&tar_path) {
@@ -2166,7 +2456,14 @@ pub async fn run_openvpn_source_build(
         Err(error) => fail_step!(job, version, B_STEP_DIGEST, "{error:#}"),
     };
     if !got.eq_ignore_ascii_case(digest) {
-        fail_step!(job, version, B_STEP_DIGEST, "源码包摘要对不上 GitHub 给的（期望 {}，实际 {}）", short_digest(digest), short_digest(&got));
+        fail_step!(
+            job,
+            version,
+            B_STEP_DIGEST,
+            "源码包摘要对不上 GitHub 给的（期望 {}，实际 {}）",
+            short_digest(digest),
+            short_digest(&got)
+        );
     }
     job.set(B_STEP_DIGEST, "ok", &short_digest(&got)).await;
 
@@ -2178,8 +2475,13 @@ pub async fn run_openvpn_source_build(
     job.set(
         B_STEP_SIGN,
         "ok",
-        &format!("主钥匙 {} 的子钥匙 {}", short_fingerprint(OVPN_SRC_SIGNERS[0]), short_fingerprint(&signer)),
-    ).await;
+        &format!(
+            "主钥匙 {} 的子钥匙 {}",
+            short_fingerprint(OVPN_SRC_SIGNERS[0]),
+            short_fingerprint(&signer)
+        ),
+    )
+    .await;
 
     job.set(B_STEP_UNPACK, "running", "").await;
     let build_dir = PathBuf::from(ovpn_src_build_dir(version));
@@ -2201,28 +2503,59 @@ pub async fn run_openvpn_source_build(
     ];
     let (output, result) = run_build_cmd(Duration::from_secs(5 * 60), &build_dir, &unpack_args);
     if let Err(error) = result {
-        fail_step!(job, version, B_STEP_UNPACK, "解包失败：{error:#}\n{}", tail_lines(&output, 6));
+        fail_step!(
+            job,
+            version,
+            B_STEP_UNPACK,
+            "解包失败：{error:#}\n{}",
+            tail_lines(&output, 6)
+        );
     }
     let source_dir = build_dir.join(format!("openvpn-{version}"));
     if !source_dir.is_dir() {
-        fail_step!(job, version, B_STEP_UNPACK, "包里没有 openvpn-{version}/ 这一层");
+        fail_step!(
+            job,
+            version,
+            B_STEP_UNPACK,
+            "包里没有 openvpn-{version}/ 这一层"
+        );
     }
-    job.set(B_STEP_UNPACK, "ok", &path_string(&source_dir)).await;
+    job.set(B_STEP_UNPACK, "ok", &path_string(&source_dir))
+        .await;
 
     let configure = ovpn_src_configure_argv(&ovpn_src_prefix(version));
-    job.set(B_STEP_CONFIGURE, "running", &configure.join(" ")).await;
+    job.set(B_STEP_CONFIGURE, "running", &configure.join(" "))
+        .await;
     let (output, result) = run_build_cmd(Duration::from_secs(10 * 60), &source_dir, &configure);
     if let Err(error) = result {
-        fail_step!(job, version, B_STEP_CONFIGURE, "configure 失败：{error:#}\n{}", tail_lines(&output, 12));
+        fail_step!(
+            job,
+            version,
+            B_STEP_CONFIGURE,
+            "configure 失败：{error:#}\n{}",
+            tail_lines(&output, 12)
+        );
     }
-    job.set(B_STEP_CONFIGURE, "ok", &configure[1..].join(" ")).await;
+    job.set(B_STEP_CONFIGURE, "ok", &configure[1..].join(" "))
+        .await;
 
     let jobs = ovpn_src_make_jobs(available_parallelism());
-    job.set(B_STEP_MAKE, "running", &format!("make -j{jobs}（几分钟到几十分钟）")).await;
+    job.set(
+        B_STEP_MAKE,
+        "running",
+        &format!("make -j{jobs}（几分钟到几十分钟）"),
+    )
+    .await;
     let make_args = vec!["make".to_string(), format!("-j{jobs}")];
     let (output, result) = run_build_cmd(Duration::from_secs(45 * 60), &source_dir, &make_args);
     if let Err(error) = result {
-        fail_step!(job, version, B_STEP_MAKE, "编译失败：{error:#}\n{}", tail_lines(&output, 12));
+        fail_step!(
+            job,
+            version,
+            B_STEP_MAKE,
+            "编译失败：{error:#}\n{}",
+            tail_lines(&output, 12)
+        );
     }
     job.set(B_STEP_MAKE, "ok", &format!("-j{jobs}")).await;
 
@@ -2230,15 +2563,31 @@ pub async fn run_openvpn_source_build(
     let install_args = vec!["make".to_string(), "install".to_string()];
     let (output, result) = run_build_cmd(Duration::from_secs(10 * 60), &source_dir, &install_args);
     if let Err(error) = result {
-        fail_step!(job, version, B_STEP_INSTALL, "安装失败：{error:#}\n{}", tail_lines(&output, 12));
+        fail_step!(
+            job,
+            version,
+            B_STEP_INSTALL,
+            "安装失败：{error:#}\n{}",
+            tail_lines(&output, 12)
+        );
     }
     let bin = ovpn_src_bin(version);
     if !is_executable_file(Path::new(&bin)) {
-        fail_step!(job, version, B_STEP_INSTALL, "装完了但 {bin} 不在，记录不写");
+        fail_step!(
+            job,
+            version,
+            B_STEP_INSTALL,
+            "装完了但 {bin} 不在，记录不写"
+        );
     }
     let built_version = parse_openvpn_version(&probe_version(&bin, &["--version".into()]));
     if built_version != version {
-        fail_step!(job, version, B_STEP_INSTALL, "编出来跑的是 {built_version:?}，不是预期的 {version}，记录不写");
+        fail_step!(
+            job,
+            version,
+            B_STEP_INSTALL,
+            "编出来跑的是 {built_version:?}，不是预期的 {version}，记录不写"
+        );
     }
     let record = OpenVPNSourceBuild {
         version: version.into(),
@@ -2264,11 +2613,18 @@ pub async fn run_openvpn_source_build(
         B_STEP_INSTALL,
         "ok",
         &format!("{version} → {bin}（apt 那份 {apt_version} 原地没动）"),
-    ).await;
+    )
+    .await;
     job.finish().await;
 }
 
-pub fn openvpn_can_build_source(family: &str, have: &str, apt_target: &str, upstream: &str, built: &str) -> bool {
+pub fn openvpn_can_build_source(
+    family: &str,
+    have: &str,
+    apt_target: &str,
+    upstream: &str,
+    built: &str,
+) -> bool {
     if family != "deb" || upstream.is_empty() || have.is_empty() {
         return false;
     }
@@ -2299,7 +2655,10 @@ pub fn openvpn_src_plan(version: &str, family: &str) -> String {
         short_fingerprint(OVPN_SRC_SIGNERS[0])
     ));
     lines.push(ovpn_src_configure_argv(&ovpn_src_prefix(version)).join(" "));
-    lines.push(format!("make -j{} && make install", ovpn_src_make_jobs(available_parallelism())));
+    lines.push(format!(
+        "make -j{} && make install",
+        ovpn_src_make_jobs(available_parallelism())
+    ));
     lines.push(format!(
         "装进 {}，**不覆盖**系统那份；自检跑到 {} 才登记启用",
         ovpn_src_prefix(version),
@@ -2353,10 +2712,16 @@ pub fn remove_openvpn_source_build() -> Result<String> {
         return Ok("本机没有 fanout 编过的 openvpn，系统那份照旧在用".into());
     };
     if !ovpn_src_deletable(&record.prefix, &record.version) {
-        bail!("记录里的安装前缀 {:?} 不在 {OVPN_SRC_PREFIX_BASE} 下面，不敢删", record.prefix);
+        bail!(
+            "记录里的安装前缀 {:?} 不在 {OVPN_SRC_PREFIX_BASE} 下面，不敢删",
+            record.prefix
+        );
     }
-    fs::remove_dir_all(&record.prefix)
-        .with_context(|| format!("删 {} 失败", record.prefix))?;
+    if let Err(error) = fs::remove_dir_all(&record.prefix) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error).with_context(|| format!("删 {} 失败", record.prefix));
+        }
+    }
     let _ = fs::remove_dir_all(ovpn_src_build_dir(&record.version));
     if let Err(error) = fs::remove_file(OVPN_SRC_RECORD_FILE) {
         if error.kind() != std::io::ErrorKind::NotFound {
@@ -2409,7 +2774,9 @@ pub fn warp_version_less(current: &str, latest: &str) -> bool {
 }
 
 pub fn warp_version_parts(version: &str) -> Option<Vec<u64>> {
-    let version = plain_version(version.trim()).trim_start_matches('v').to_string();
+    let version = plain_version(version.trim())
+        .trim_start_matches('v')
+        .to_string();
     if version.is_empty() {
         return None;
     }
@@ -2448,7 +2815,10 @@ pub fn parse_warp_codenames(value: &str) -> Vec<String> {
 }
 
 pub async fn warp_latest_version() -> Result<String> {
-    warp_latest_version_with(|url| fetch_http_text(url, "fanout-warp-check", Duration::from_secs(8), 24 << 20)).await
+    warp_latest_version_with(|url| async move {
+        fetch_http_text(&url, "fanout-warp-check", Duration::from_secs(8), 24 << 20).await
+    })
+    .await
 }
 
 pub async fn warp_latest_version_with<F, Fut>(mut fetch: F) -> Result<String>
@@ -2463,15 +2833,20 @@ where
         if elapsed >= Duration::from_secs(20) {
             break;
         }
-        let url = format!("{WARP_PKG_INDEX}", codename = codename);
-        let remaining = Duration::from_secs(20).saturating_sub(elapsed).min(Duration::from_secs(8));
+        let url = WARP_PKG_INDEX.replace("%s", &codename);
+        let remaining = Duration::from_secs(20)
+            .saturating_sub(elapsed)
+            .min(Duration::from_secs(8));
         match tokio::time::timeout(remaining, fetch(url)).await {
             Ok(Ok(blob)) => {
                 let version = parse_warp_pkg_version(&blob);
                 if !version.is_empty() {
                     return Ok(version);
                 }
-                last_error = Some(anyhow!("{} 的索引里没有 cloudflare-warp 的版本号", codename));
+                last_error = Some(anyhow!(
+                    "{} 的索引里没有 cloudflare-warp 的版本号",
+                    codename
+                ));
             }
             Ok(Err(error)) => last_error = Some(error),
             Err(_) => last_error = Some(anyhow!("{codename} 的官方索引查询超时")),
@@ -2518,7 +2893,9 @@ pub struct ClientRuntime {
 impl Default for ClientRuntime {
     fn default() -> Self {
         Self {
-            work_dir: env::var_os("FANOUT_WORK_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/var/lib/fanout")),
+            work_dir: env::var_os("FANOUT_WORK_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/var/lib/fanout")),
             backend: env::var("FANOUT_PANEL_MODE").unwrap_or_default(),
             xray_path: None,
             xray_error: String::new(),
@@ -2552,8 +2929,14 @@ impl ClientRuntime {
         let settings_path = runtime.work_dir.join("settings.json");
         if let Ok(blob) = fs::read_to_string(settings_path) {
             if let Ok(settings) = serde_json::from_str::<serde_json::Value>(&blob) {
-                runtime.warp.enabled = settings.pointer("/warp/enabled").and_then(serde_json::Value::as_bool).unwrap_or(false);
-                if let Some(version) = settings.pointer("/warp/client_version").and_then(serde_json::Value::as_str) {
+                runtime.warp.enabled = settings
+                    .pointer("/warp/enabled")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if let Some(version) = settings
+                    .pointer("/warp/client_version")
+                    .and_then(serde_json::Value::as_str)
+                {
                     if !version.is_empty() {
                         runtime.warp.report_version = version.to_string();
                     }
@@ -2569,7 +2952,9 @@ impl ClientRuntime {
                     .map(|accounts| {
                         accounts
                             .iter()
-                            .filter_map(|account| account.get("version").and_then(serde_json::Value::as_str))
+                            .filter_map(|account| {
+                                account.get("version").and_then(serde_json::Value::as_str)
+                            })
                             .map(str::to_string)
                             .collect()
                     })
@@ -2599,7 +2984,10 @@ where
             if !have("apt-get") {
                 bail!("Debian/Ubuntu 系没有 apt-get，无法安装 {WIREGUARD_PKG}");
             }
-            vec![argv(&["apt-get", "install", "-y", WIREGUARD_PKG])]
+            vec![
+                argv(&["apt-get", "update", "-qq"]),
+                argv(&["apt-get", "install", "-y", WIREGUARD_PKG]),
+            ]
         }
         "rpm" => {
             if have("dnf") {
@@ -2620,13 +3008,25 @@ where
             if !have("pacman") {
                 bail!("Arch 系没有 pacman，无法安装 {WIREGUARD_PKG}");
             }
-            vec![argv(&["pacman", "-Sy", "--noconfirm", "--needed", WIREGUARD_PKG])]
+            vec![argv(&[
+                "pacman",
+                "-Sy",
+                "--noconfirm",
+                "--needed",
+                WIREGUARD_PKG,
+            ])]
         }
         "suse" => {
             if !have("zypper") {
                 bail!("openSUSE 系没有 zypper，无法安装 {WIREGUARD_PKG}");
             }
-            vec![argv(&["zypper", "--non-interactive", "install", "-y", WIREGUARD_PKG])]
+            vec![argv(&[
+                "zypper",
+                "--non-interactive",
+                "install",
+                "-y",
+                WIREGUARD_PKG,
+            ])]
         }
         _ => bail!("认不出这台机器的发行版，请手动安装 {WIREGUARD_PKG}"),
     };
@@ -2641,7 +3041,10 @@ pub fn warp_probe_deps(runtime: &ClientRuntime) -> WarpDeps {
         };
     }
     if has_cmd("wg") {
-        return WarpDeps { ready: true, ..WarpDeps::default() };
+        return WarpDeps {
+            ready: true,
+            ..WarpDeps::default()
+        };
     }
     let os_release = fs::read_to_string(OS_RELEASE_PATH).unwrap_or_default();
     match wireguard_install_plan(&os_release, has_cmd) {
@@ -2674,10 +3077,15 @@ pub async fn client_bin_status(ask_latest: bool) -> ClientBinStatus {
 }
 
 pub async fn client_bin_status_with(runtime: &ClientRuntime, ask_latest: bool) -> ClientBinStatus {
-    client_bin_status_assessment(runtime, ask_latest).await.status
+    client_bin_status_assessment(runtime, ask_latest)
+        .await
+        .status
 }
 
-pub async fn client_bin_status_assessment(runtime: &ClientRuntime, ask_latest: bool) -> ClientBinAssessment {
+pub async fn client_bin_status_assessment(
+    runtime: &ClientRuntime,
+    ask_latest: bool,
+) -> ClientBinAssessment {
     let mut status = ClientBinStatus {
         backend: runtime.backend.clone(),
         ..ClientBinStatus::default()
@@ -2691,7 +3099,8 @@ pub async fn client_bin_status_assessment(runtime: &ClientRuntime, ask_latest: b
         None => match find_xray(&runtime.work_dir) {
             Ok(path) => {
                 status.path = path_string(&path);
-                status.current = parse_xray_version(&probe_version(&status.path, &["version".into()]));
+                status.current =
+                    parse_xray_version(&probe_version(&status.path, &["version".into()]));
             }
             Err(error) => status.reason = format!("{error:#}"),
         },
@@ -2706,7 +3115,8 @@ pub async fn client_bin_status_assessment(runtime: &ClientRuntime, ask_latest: b
             status.openvpn_source_bin = record.bin.clone();
             status.openvpn_source_active = active_openvpn == record.bin;
             if status.openvpn_source_active {
-                apt_version = parse_openvpn_version(&probe_version("openvpn", &["--version".into()]));
+                apt_version =
+                    parse_openvpn_version(&probe_version("openvpn", &["--version".into()]));
                 status.openvpn_apt = !apt_version.is_empty();
             }
         }
@@ -2714,7 +3124,8 @@ pub async fn client_bin_status_assessment(runtime: &ClientRuntime, ask_latest: b
 
     let mut os_release = String::new();
     if status.openvpn.is_empty() {
-        status.openvpn_reason = "本机没有 openvpn，出口隧道起不来；先装一个（apt/apk install openvpn）".into();
+        status.openvpn_reason =
+            "本机没有 openvpn，出口隧道起不来；先装一个（apt/apk install openvpn）".into();
     } else {
         match fs::read_to_string(OS_RELEASE_PATH) {
             Ok(blob) => {
@@ -2729,7 +3140,8 @@ pub async fn client_bin_status_assessment(runtime: &ClientRuntime, ask_latest: b
                 }
             }
             Err(error) => {
-                status.openvpn_reason = format!("读 {OS_RELEASE_PATH} 失败，不知道该怎么升：{error:#}")
+                status.openvpn_reason =
+                    format!("读 {OS_RELEASE_PATH} 失败，不知道该怎么升：{error:#}")
             }
         }
     }
@@ -2768,8 +3180,9 @@ pub async fn client_bin_status_assessment(runtime: &ClientRuntime, ask_latest: b
     match warp_latest_version().await {
         Ok(latest) => {
             assessment.status.warp_latest = latest.clone();
-            assessment.status.warp_has_update = warp_version_less(&assessment.status.warp_version, &latest)
-                || assessment.status.warp_stale > 0;
+            assessment.status.warp_has_update =
+                warp_version_less(&assessment.status.warp_version, &latest)
+                    || assessment.status.warp_stale > 0;
         }
         Err(error) => assessment.status.warp_check_error = format!("{error:#}"),
     }
@@ -2789,11 +3202,8 @@ pub async fn client_bin_status_assessment(runtime: &ClientRuntime, ask_latest: b
         assessment.openvpn_from_official = !decision.channel.is_empty();
         assessment.status.openvpn_has_update = !decision.target.is_empty();
         if decision.needs_write {
-            assessment.status.openvpn_repo_line = ovpn_apt_repo_line(
-                &decision.channel,
-                &decision.arch,
-                &decision.codename,
-            );
+            assessment.status.openvpn_repo_line =
+                ovpn_apt_repo_line(&decision.channel, &decision.arch, &decision.codename);
             assessment.status.openvpn_cmd = format!(
                 "写入 {OVPN_APT_KEYRING}（OpenVPN 官方签名密钥）\n写入 {OVPN_APT_SOURCES}：\n  {}\n{}",
                 assessment.status.openvpn_repo_line,
@@ -2810,8 +3220,8 @@ pub async fn client_bin_status_assessment(runtime: &ClientRuntime, ask_latest: b
     match xray_result {
         Ok(latest) => {
             assessment.status.latest = latest.clone();
-            assessment.status.has_update = assessment.status.updatable
-                && version_less(&assessment.status.current, &latest);
+            assessment.status.has_update =
+                assessment.status.updatable && version_less(&assessment.status.current, &latest);
         }
         Err(error) => assessment.status.check_error = format!("{error:#}"),
     }
@@ -2846,9 +3256,10 @@ pub async fn client_bin_status_assessment(runtime: &ClientRuntime, ask_latest: b
                         assessment.status.openvpn_build_cmd = plan;
                         assessment.status.openvpn_build_path = ovpn_src_prefix(&upstream);
                         if !assessment.status.openvpn_note.is_empty() {
-                            assessment.status.openvpn_note.push_str(
-                                "；可以从官方源码包编一份（装进独立目录，不动系统那份）",
-                            );
+                            assessment
+                                .status
+                                .openvpn_note
+                                .push_str("；可以从官方源码包编一份（装进独立目录，不动系统那份）");
                         }
                     }
                 }
@@ -2863,7 +3274,10 @@ pub async fn client_bin_status_assessment(runtime: &ClientRuntime, ask_latest: b
     assessment
 }
 
-pub async fn client_bin_status_json(runtime: &ClientRuntime, ask_latest: bool) -> Result<serde_json::Value> {
+pub async fn client_bin_status_json(
+    runtime: &ClientRuntime,
+    ask_latest: bool,
+) -> Result<serde_json::Value> {
     client_bin_status_json_from(&client_bin_status_assessment(runtime, ask_latest).await)
 }
 
@@ -2871,16 +3285,24 @@ pub async fn client_bin_status_json(runtime: &ClientRuntime, ask_latest: bool) -
 /// pre-existing Rust model. Empty Go `omitempty` booleans are removed too.
 pub fn client_bin_status_json_from(assessment: &ClientBinAssessment) -> Result<serde_json::Value> {
     let mut value = serde_json::to_value(&assessment.status)?;
-    let object = value.as_object_mut().ok_or_else(|| anyhow!("ClientBinStatus 不是 JSON 对象"))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("ClientBinStatus 不是 JSON 对象"))?;
     if assessment.openvpn_official.is_empty() {
         object.remove("openvpn_official");
     } else {
-        object.insert("openvpn_official".into(), serde_json::Value::String(assessment.openvpn_official.clone()));
+        object.insert(
+            "openvpn_official".into(),
+            serde_json::Value::String(assessment.openvpn_official.clone()),
+        );
     }
     if assessment.openvpn_apt.is_empty() {
         object.remove("openvpn_apt");
     } else {
-        object.insert("openvpn_apt".into(), serde_json::Value::String(assessment.openvpn_apt.clone()));
+        object.insert(
+            "openvpn_apt".into(),
+            serde_json::Value::String(assessment.openvpn_apt.clone()),
+        );
     }
     object.insert(
         "openvpn_from_official".into(),
@@ -2935,14 +3357,22 @@ pub fn find_command(name: &str) -> Option<PathBuf> {
 }
 
 pub fn dir_exists(path: &Path) -> bool {
-    fs::metadata(path).map(|metadata| metadata.is_dir()).unwrap_or(false)
+    fs::metadata(path)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
 }
 
 fn capture_output(mut command: Command, timeout: Duration) -> Result<Output> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
-    let mut stdout = child.stdout.take().ok_or_else(|| anyhow!("命令 stdout 不可读"))?;
-    let mut stderr = child.stderr.take().ok_or_else(|| anyhow!("命令 stderr 不可读"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("命令 stdout 不可读"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("命令 stderr 不可读"))?;
     let started = Instant::now();
     let (status, stdout, stderr) = thread::scope(|scope| {
         let stdout_reader = scope.spawn(|| {
@@ -2964,11 +3394,19 @@ fn capture_output(mut command: Command, timeout: Duration) -> Result<Output> {
             }
             thread::sleep(Duration::from_millis(20));
         };
-        let stdout = stdout_reader.join().map_err(|_| anyhow!("读取命令 stdout 失败"))??;
-        let stderr = stderr_reader.join().map_err(|_| anyhow!("读取命令 stderr 失败"))??;
+        let stdout = stdout_reader
+            .join()
+            .map_err(|_| anyhow!("读取命令 stdout 失败"))??;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| anyhow!("读取命令 stderr 失败"))??;
         Ok((status, stdout, stderr))
     })?;
-    Ok(Output { status, stdout, stderr })
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn combined_output(output: &Output) -> String {
@@ -2996,6 +3434,14 @@ fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
     let mut name: OsString = path.as_os_str().to_os_string();
     name.push(suffix);
     PathBuf::from(name)
+}
+
+struct RemoveFileOnDrop(PathBuf);
+
+impl Drop for RemoveFileOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 fn clean_path(path: &Path) -> PathBuf {

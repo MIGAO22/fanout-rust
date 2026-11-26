@@ -16,7 +16,7 @@ pub struct Node {
     pub config: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SocksCred {
     pub user: String,
     pub pass: String,

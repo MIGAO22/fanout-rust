@@ -13,14 +13,16 @@ use crate::{
         assess_pool_fill, canonical_pool_mode, creation_room, fill_avoid, fill_candidates,
         fill_completion_note, fill_failure_reason, fill_slot, host_in_pool, load_pool_store,
         parse_pool_seq, pool_reuse_pick, pool_view, retire_slot, target_key, PoolFillState,
-        PoolMember, PoolRuntimeState, POOL_FILL_INTERVAL, POOL_FILL_SLOT_FLOOR, POOL_MODE_BALANCE,
-        POOL_MODE_SINGLE, POOL_PROBE_INTERVAL, POOL_PROBE_TARGET, POOL_TRY_TIMEOUT,
+        PoolMember, PoolRuntimeState, POOL_FILL_INTERVAL, POOL_FILL_SLOT_FLOOR, POOL_FILL_WAIT_UP,
+        POOL_MODE_BALANCE, POOL_MODE_SINGLE, POOL_PROBE_INTERVAL, POOL_PROBE_TARGET,
+        POOL_TRY_TIMEOUT,
     },
     socks5::{serve_socks, DialNetwork, DialSocket, SocksDialer},
 };
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
+use futures::StreamExt;
 use std::{
     collections::{HashMap, HashSet},
     fmt, fs,
@@ -30,7 +32,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex as StdMutex, MutexGuard, OnceLock, Weak,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     net::TcpListener,
@@ -45,6 +47,7 @@ const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 const RAND_PORT_MIN: u16 = 20_000;
 const RAND_PORT_MAX: u16 = 60_000;
 const LISTEN_ATTEMPTS: usize = 4;
+const MEMBER_CACHE_TTL: Duration = Duration::from_millis(250);
 const EXTERNAL_XRAY_CONFIG: &str = "/usr/local/etc/xray/config.json";
 
 static POOL_PORTS: OnceLock<StdMutex<HashSet<u16>>> = OnceLock::new();
@@ -120,6 +123,7 @@ struct ServiceState {
     runs: HashMap<String, Arc<PoolRun>>,
     probing: HashSet<(String, String)>,
     fill: PoolFillState,
+    member_cache: HashMap<String, (Instant, Vec<ResolvedMember>)>,
 }
 
 struct PoolServiceInner {
@@ -208,8 +212,12 @@ impl PoolRun {
             .reconfigure(mode, step);
     }
 
-    fn note_success(&self, host: &str, sample: Duration) {
-        lock_unpoisoned(&self.runtime).note_success(host, sample, Utc::now());
+    fn apply_target_state(&self, target: &str, members: &mut [PoolMember]) {
+        lock_unpoisoned(&self.runtime).apply_target_state(target, members);
+    }
+
+    fn note_success(&self, target: &str, host: &str, sample: Duration) {
+        lock_unpoisoned(&self.runtime).note_target_success(target, host, sample, Utc::now());
     }
 
     fn note_failure(&self, host: &str) {
@@ -346,6 +354,7 @@ impl PoolService {
         {
             let mut state = lock_unpoisoned(&self.inner.state);
             state.store = store;
+            state.member_cache.remove(&pool.id);
             if existing {
                 if let Some(run) = state.runs.get(&pool.id) {
                     run.reconfigure(&pool.mode, pool.rr_step);
@@ -581,15 +590,12 @@ impl PoolService {
     ) -> Result<(DialSocket, String)> {
         self.ensure_open()?;
         let run = self.run_of(id).ok_or_else(|| anyhow!("出口组未在运行"))?;
+        let target = target_key(addr);
         let members = self.resolved_members(id).await;
-        let choice = run.choose(
-            &target_key(addr),
-            &members
-                .iter()
-                .map(|member| member.member.clone())
-                .collect::<Vec<_>>(),
-            network == DialNetwork::Tcp,
-        );
+        let mut policy_members: Vec<PoolMember> =
+            members.iter().map(|member| member.member.clone()).collect();
+        run.apply_target_state(&target, &mut policy_members);
+        let choice = run.choose(&target, &policy_members, network == DialNetwork::Tcp);
         if choice.order.is_empty() {
             bail!("出口组内没有可用出口");
         }
@@ -606,7 +612,7 @@ impl PoolService {
                         .cloned()
                 })
                 .collect();
-            return Self::race_dial(&run, candidates, network, addr).await;
+            return Self::race_dial(&run, candidates, network, addr, &target).await;
         }
 
         let mut last_error = None;
@@ -621,7 +627,7 @@ impl PoolService {
             let outcome = dial_candidate(member, network, addr).await;
             match outcome.result {
                 Ok(socket) => {
-                    run.note_success(&outcome.host, outcome.elapsed);
+                    run.note_success(&target, &outcome.host, outcome.elapsed);
                     return Ok((socket, outcome.host));
                 }
                 Err(error) => {
@@ -729,11 +735,16 @@ impl PoolService {
                 return;
             }
         }
-        for pool in self.pools() {
-            if pool.auto_fill {
-                self.fill_pool(&pool).await;
-            }
-        }
+        let pools: Vec<_> = self
+            .pools()
+            .into_iter()
+            .filter(|pool| pool.auto_fill)
+            .collect();
+        let mut fills = futures::stream::iter(pools.into_iter().map(|pool| async move {
+            self.fill_pool(&pool).await;
+        }))
+        .buffer_unordered(2);
+        while fills.next().await.is_some() {}
         let mut state = lock_unpoisoned(&self.inner.state);
         state.fill.finish_fill();
         state.fill.prune_bad(Utc::now());
@@ -858,13 +869,7 @@ impl PoolService {
                 return Err(node.hostname);
             }
         };
-        if self
-            .inner
-            .manager
-            .wait_up(&tunnel, Duration::from_secs(420))
-            .await
-            != "up"
-        {
+        if self.inner.manager.wait_up(&tunnel, POOL_FILL_WAIT_UP).await != "up" {
             let _ = self.inner.manager.stop(tunnel.slot).await;
             self.mark_fill_bad(&node.hostname).await;
             return Err(node.hostname);
@@ -893,6 +898,7 @@ impl PoolService {
         if store.swap_member(id, old_host, new_host)? {
             store.save(&self.inner.dir)?;
             state.store = store;
+            state.member_cache.remove(id);
         }
         Ok(())
     }
@@ -971,6 +977,14 @@ impl PoolService {
     }
 
     async fn resolved_members(&self, id: &str) -> Vec<ResolvedMember> {
+        if let Some((at, members)) = lock_unpoisoned(&self.inner.state)
+            .member_cache
+            .get(id)
+            .filter(|(at, _)| at.elapsed() < MEMBER_CACHE_TTL)
+            .cloned()
+        {
+            return members;
+        }
         let Some(pool) = self.pool(id) else {
             return Vec::new();
         };
@@ -1023,6 +1037,15 @@ impl PoolService {
                 member.member.latency = snapshot.latency;
                 member.member.cooling = snapshot.cooling;
             }
+        }
+        {
+            let mut state = lock_unpoisoned(&self.inner.state);
+            if state.member_cache.len() >= 128 {
+                state.member_cache.clear();
+            }
+            state
+                .member_cache
+                .insert(id.to_string(), (Instant::now(), members.clone()));
         }
         members
     }
@@ -1089,6 +1112,7 @@ impl PoolService {
         candidates: Vec<ResolvedMember>,
         network: DialNetwork,
         addr: &str,
+        target: &str,
     ) -> Result<(DialSocket, String)> {
         if candidates.is_empty() {
             bail!("出口组内没有可用出口");
@@ -1111,13 +1135,14 @@ impl PoolService {
             };
             match outcome.result {
                 Ok(socket) => {
-                    run.note_success(&outcome.host, outcome.elapsed);
+                    run.note_success(target, &outcome.host, outcome.elapsed);
                     let remaining = candidates.len() - index - 1;
                     if remaining != 0 {
                         let runtime = Arc::clone(&run.runtime);
+                        let late_target = target.to_string();
                         tokio::spawn(async move {
                             while let Some(late) = rx.recv().await {
-                                note_outcome(&runtime, &late);
+                                note_outcome(&runtime, &late, &late_target);
                                 if let Ok(socket) = late.result {
                                     drop(socket);
                                 }
@@ -1197,10 +1222,10 @@ async fn dial_candidate(
     }
 }
 
-fn note_outcome(runtime: &StdMutex<PoolRuntimeState>, outcome: &AttemptOutcome) {
+fn note_outcome(runtime: &StdMutex<PoolRuntimeState>, outcome: &AttemptOutcome, target: &str) {
     let mut runtime = lock_unpoisoned(runtime);
     match &outcome.result {
-        Ok(_) => runtime.note_success(&outcome.host, outcome.elapsed, Utc::now()),
+        Ok(_) => runtime.note_target_success(target, &outcome.host, outcome.elapsed, Utc::now()),
         Err(_) => runtime.note_failure(&outcome.host, Utc::now()),
     }
 }

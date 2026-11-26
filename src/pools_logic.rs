@@ -28,6 +28,7 @@ pub const POOL_TAG_PREFIX: &str = "pool-";
 pub const POOL_MAX_RR_STEP: usize = 1000;
 pub const POOL_TRY_TIMEOUT: Duration = Duration::from_secs(4);
 pub const POOL_AFFINITY_MAX: usize = 4096;
+pub const POOL_TARGET_STATS_MAX: usize = 4096;
 pub const POOL_SWITCH_FLOOR: Duration = Duration::from_millis(600);
 pub const POOL_SWITCH_RATIO: u32 = 2;
 pub const POOL_EWMA_ALPHA: f64 = 0.3;
@@ -39,6 +40,7 @@ pub const POOL_PROBE_TARGET: &str = "1.1.1.1:443";
 
 pub const POOL_FILL_INTERVAL: Duration = Duration::from_secs(10);
 pub const POOL_FILL_DEAD_AFTER: Duration = Duration::from_secs(90);
+pub const POOL_FILL_WAIT_UP: Duration = Duration::from_secs(90);
 pub const POOL_FILL_SLOT_FLOOR: usize = 2;
 pub const POOL_FILL_PENALTY: Duration = Duration::from_secs(600);
 pub const POOL_MAX_SIZE: usize = POOL_MAX_HOSTS;
@@ -576,6 +578,7 @@ impl MemberStat {
 pub struct PoolRuntimeState {
     pub policy: PoolPolicy,
     pub stats: HashMap<String, MemberStat>,
+    target_stats: HashMap<(String, String), Duration>,
 }
 
 impl PoolRuntimeState {
@@ -583,6 +586,7 @@ impl PoolRuntimeState {
         Self {
             policy: PoolPolicy::new(mode, step),
             stats: HashMap::new(),
+            target_stats: HashMap::new(),
         }
     }
 
@@ -593,11 +597,40 @@ impl PoolRuntimeState {
             .note_ok(sample, now);
     }
 
+    pub fn note_target_success(
+        &mut self,
+        target: &str,
+        host: &str,
+        sample: Duration,
+        now: DateTime<Utc>,
+    ) {
+        self.note_success(host, sample, now);
+        if self.target_stats.len() >= POOL_TARGET_STATS_MAX {
+            self.target_stats.clear();
+        }
+        let key = (target.to_string(), host.to_string());
+        let previous = self.target_stats.get(&key).copied().unwrap_or_default();
+        self.target_stats
+            .insert(key, ewma_latency(previous, sample));
+    }
+
+    pub fn apply_target_state(&self, target: &str, members: &mut [PoolMember]) {
+        for member in members {
+            if let Some(latency) = self
+                .target_stats
+                .get(&(target.to_string(), member.host.clone()))
+            {
+                member.latency = *latency;
+            }
+        }
+    }
+
     pub fn note_failure(&mut self, host: &str, now: DateTime<Utc>) {
         self.stats
             .entry(host.to_string())
             .or_default()
             .note_fail(now);
+        self.target_stats.retain(|(_, tracked), _| tracked != host);
         self.policy.forget_member(host);
     }
 
@@ -616,7 +649,7 @@ impl PoolRuntimeState {
     pub fn needs_probe(&self, mode: &str, member: &PoolMember, now: DateTime<Utc>) -> bool {
         if !matches!(
             canonical_pool_mode(mode),
-            Some(POOL_MODE_SINGLE) | Some(POOL_MODE_BALANCE)
+            Some(POOL_MODE_SINGLE) | Some(POOL_MODE_ROUND_ROBIN) | Some(POOL_MODE_BALANCE)
         ) || !member.up
             || member.namespace.is_empty()
         {

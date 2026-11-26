@@ -901,6 +901,35 @@ fn runtime_state_applies_samples_and_forgets_failed_affinity() {
 }
 
 #[test]
+fn target_latency_overrides_global_samples_for_balance_selection() {
+    let now = test_now();
+    let mut runtime = PoolRuntimeState::new(POOL_MODE_BALANCE, 1);
+    runtime.note_target_success("target.test", "a", Duration::from_millis(100), now);
+    runtime.note_target_success(
+        "target.test",
+        "a",
+        Duration::from_millis(200),
+        now + ChronoDuration::seconds(1),
+    );
+    runtime.note_target_success(
+        "other.test",
+        "a",
+        Duration::from_millis(50),
+        now + ChronoDuration::seconds(2),
+    );
+
+    let mut members = [
+        up_member("a", Duration::from_millis(400)),
+        up_member("b", Duration::from_millis(300)),
+    ];
+    runtime.apply_target_state("target.test", &mut members);
+    assert_eq!(members[0].latency, Duration::from_millis(130));
+    assert_eq!(members[1].latency, Duration::from_millis(300));
+    runtime.apply_target_state("other.test", &mut members);
+    assert_eq!(members[0].latency, Duration::from_millis(50));
+}
+
+#[test]
 fn pool_view_projects_runtime_state_and_mode_aliases() {
     let pool = Pool {
         id: "p1".to_string(),

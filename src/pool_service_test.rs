@@ -367,7 +367,13 @@ async fn concurrent_dial_returns_the_winner_and_closes_late_sockets() {
 
     let (socket, host) = timeout(
         Duration::from_secs(2),
-        PoolService::race_dial(&run, candidates, DialNetwork::Tcp, "example.com:443"),
+        PoolService::race_dial(
+            &run,
+            candidates,
+            DialNetwork::Tcp,
+            "example.com:443",
+            "example.com",
+        ),
     )
     .await
     .unwrap()

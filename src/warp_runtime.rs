@@ -7,6 +7,9 @@ use tokio::{
 
 use crate::{
     config::WebSettings,
+    instance::Instance,
+    jobs::JobHandle,
+    manager::Manager,
     models::{Node, WarpOverview},
     netns::Netns,
     process::{output_command, start_tokio_command},
@@ -24,14 +27,18 @@ const WARP_CLIENT_VERSION: &str = "2026.8.2115.0";
 
 pub struct WarpService {
     dir: std::path::PathBuf,
-    tag: String,
+    instance: Instance,
     settings: Arc<RwLock<WebSettings>>,
     accounts: Arc<Mutex<Vec<WarpAccount>>>,
     lock: Arc<Semaphore>,
 }
 
 impl WarpService {
-    pub fn load(dir: &Path, tag: String, settings: Arc<RwLock<WebSettings>>) -> Result<Arc<Self>> {
+    pub fn load(
+        dir: &Path,
+        instance: Instance,
+        settings: Arc<RwLock<WebSettings>>,
+    ) -> Result<Arc<Self>> {
         let blob = std::fs::read(dir.join("warp.json")).unwrap_or_default();
         let accounts = if blob.is_empty() {
             Vec::new()
@@ -40,7 +47,7 @@ impl WarpService {
         };
         Ok(Arc::new(Self {
             dir: dir.to_path_buf(),
-            tag,
+            instance,
             settings,
             accounts: Arc::new(Mutex::new(accounts)),
             lock: Arc::new(Semaphore::new(1)),
@@ -159,7 +166,7 @@ impl WarpService {
             }
         }
         let cmds = warp_setup_cmds(&WarpSetupInput {
-            dev: a.dev_name(&self.tag),
+            dev: a.dev_name(&self.instance.tag),
             peer_key: a.peer_key.clone(),
             endpoint: a.endpoint.clone(),
             port: a.port,
@@ -173,7 +180,7 @@ impl WarpService {
             run_warp(ns, &c, &a.priv_key).await?;
         }
         let ips = warp_gate_ips(&node.config, &node.ip);
-        for c in crate::warp_logic::warp_gate_pin_cmds(&a.dev_name(&self.tag), &ips) {
+        for c in crate::warp_logic::warp_gate_pin_cmds(&a.dev_name(&self.instance.tag), &ips) {
             run_warp(ns, &c, "").await?;
         }
         Ok(a)
@@ -181,7 +188,7 @@ impl WarpService {
 
     pub async fn split(&self, ns: &Netns, node: &Node, a: &WarpAccount) -> Result<()> {
         for c in warp_split_cmds(
-            &a.dev_name(&self.tag),
+            &a.dev_name(&self.instance.tag),
             "tun0",
             &warp_gate_ips(&node.config, &node.ip),
         ) {
@@ -205,13 +212,13 @@ impl WarpService {
         )?;
         let state = crate::warp_logic::parse_warp_routes(
             &String::from_utf8_lossy(&out.stdout),
-            &a.dev_name(&self.tag),
+            &a.dev_name(&self.instance.tag),
         );
         if !crate::warp_logic::warp_guard_needed(&state) {
             return Ok(false);
         }
         for c in warp_guard_cmds(
-            &a.dev_name(&self.tag),
+            &a.dev_name(&self.instance.tag),
             "tun0",
             &warp_gate_ips(&node.config, &node.ip),
             state.tun_up,
@@ -228,7 +235,7 @@ impl WarpService {
         let Some(a) = accounts.iter().find(|a| a.slot == slot) else {
             return (String::new(), false);
         };
-        let dev = a.dev_name(&self.tag);
+        let dev = a.dev_name(&self.instance.tag);
         let args = vec![
             "netns".into(),
             "exec".into(),
@@ -266,30 +273,114 @@ impl WarpService {
         }
     }
 
+    pub async fn reregister(&self, manager: &Arc<Manager>, job: JobHandle) -> Result<()> {
+        let settings = self.settings.read().await.clone();
+        if !settings.warp().enabled {
+            bail!("中转还没打开，开了才谈得上重新注册");
+        }
+        let tunnels = manager.tunnels().await;
+        if tunnels.is_empty() {
+            bail!("现在没有出口，没有可重新注册的线路");
+        }
+        let version = settings
+            .warp()
+            .client_version
+            .unwrap_or_else(|| WARP_CLIENT_VERSION.into());
+        let mut at = 0;
+        if !crate::clients::has_cmd("wg") {
+            job.set(at, "running", "正在安装 wireguard-tools").await;
+            let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+            let plan = match crate::clients::wireguard_install_plan(
+                &os_release,
+                crate::clients::has_cmd,
+            ) {
+                Ok((steps, _)) => steps,
+                Err(err) => {
+                    job.set(at, "failed", &err.to_string()).await;
+                    job.finish().await;
+                    return Err(err);
+                }
+            };
+            for command in plan {
+                if let Err(err) =
+                    crate::clients::run_repo_query(&command, Duration::from_secs(10 * 60))
+                {
+                    job.set(at, "failed", &err.to_string()).await;
+                    job.finish().await;
+                    return Err(err);
+                }
+            }
+            job.set(at, "ok", "wg 已就位").await;
+            at += 1;
+        }
+        for tunnel in tunnels {
+            let host = tunnel.host().await;
+            job.set(at, "running", "正在重新注册").await;
+            if let Err(err) = self.drop(tunnel.slot).await {
+                job.set(at, "failed", &err.to_string()).await;
+                at += 1;
+                continue;
+            }
+            let account = match self.ensure(tunnel.slot, &version).await {
+                Ok(account) => account,
+                Err(err) => {
+                    job.set(at, "failed", &err.to_string()).await;
+                    at += 1;
+                    continue;
+                }
+            };
+            manager.reconnect(tunnel.clone(), host).await;
+            let ns = Netns::new(self.instance.clone(), tunnel.slot);
+            if self.wait(&ns, tunnel.slot, Duration::from_secs(120)).await {
+                job.set(at, "ok", &format!("Cloudflare 接入 {}", account.endpoint))
+                    .await;
+            } else {
+                job.set(at, "failed", "WARP 握手超时").await;
+            }
+            at += 1;
+        }
+        job.finish().await;
+        Ok(())
+    }
+
     pub async fn overview(&self) -> WarpOverview {
         let settings = self.settings.read().await.clone();
         let accounts = self.all().await;
-        let ready = crate::warp_logic::wireguard_install_plan(
-            &std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
-            |_| true,
-        )
-        .is_ok();
+        let version = settings
+            .warp()
+            .client_version
+            .unwrap_or_else(|| WARP_CLIENT_VERSION.into());
+        let (ready, reason, need_tools, pkg_cmd) = if crate::clients::has_cmd("wg") {
+            (true, String::new(), false, String::new())
+        } else {
+            let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+            match crate::clients::wireguard_install_plan(&os_release, crate::clients::has_cmd) {
+                Ok((steps, _)) => (
+                    true,
+                    String::new(),
+                    true,
+                    steps
+                        .iter()
+                        .map(|step| step.join(" "))
+                        .collect::<Vec<_>>()
+                        .join(" && "),
+                ),
+                Err(err) => (false, err.to_string(), false, String::new()),
+            }
+        };
         WarpOverview {
             enabled: settings.warp().enabled,
             ready,
-            reason: String::new(),
-            need_tools: false,
-            pkg_cmd: String::new(),
+            reason,
+            need_tools,
+            pkg_cmd,
             last_err: String::new(),
-            version: settings
-                .warp()
-                .client_version
-                .unwrap_or_else(|| WARP_CLIENT_VERSION.into()),
+            version: version.clone(),
             count: accounts.len(),
             live: 0,
             stale: accounts
                 .iter()
-                .filter(|a| a.version != WARP_CLIENT_VERSION)
+                .filter(|account| account.version != version)
                 .count(),
         }
     }

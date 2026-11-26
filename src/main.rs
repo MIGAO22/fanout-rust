@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
     }
 
     let settings = Arc::new(RwLock::new(settings));
-    let warp = warp_runtime::WarpService::load(&dir, tag.clone(), settings.clone())?;
+    let warp = warp_runtime::WarpService::load(&dir, instance.clone(), settings.clone())?;
     let listen_addr = settings.read().await.listen_addr.clone();
     let web_port = settings.read().await.port;
     let jobs = jobs::JobStore::new();
@@ -208,6 +208,7 @@ async fn main() -> Result<()> {
         .route("/api/stats", get(api::stats))
         .route("/api/client/status", get(api::client_status))
         .route("/api/client/xray/apply", post(api::client_xray_apply))
+        .route("/api/client/warp/apply", post(api::client_warp_apply))
         .route("/api/client/openvpn/apply", post(api::client_openvpn_apply))
         .route("/api/client/openvpn/repo", post(api::client_openvpn_repo))
         .route("/api/client/openvpn/build", post(api::client_openvpn_build))
@@ -222,9 +223,6 @@ async fn main() -> Result<()> {
         .route("/api/update/check", get(api::update_check))
         .route("/api/update/apply", post(api::update_apply));
 
-    for path in ["/api/client/warp/apply"] {
-        app = app.route(path, get(api::not_implemented).post(api::not_implemented));
-    }
     let app = app.with_state(state.clone());
     let app = app.merge(panel_api::panel_routes(
         panels.as_ref().clone(),

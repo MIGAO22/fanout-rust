@@ -925,10 +925,15 @@ fn source_build_lock_and_job_progress_are_consistent() {
 
 #[tokio::test]
 async fn source_build_job_reports_failure() {
-    let job = SourceBuildJob::new("2.7.9");
+    let store = crate::jobs::JobStore::new();
+    let labels = OPENVPN_BUILD_STEPS
+        .iter()
+        .map(|label| (*label).to_string())
+        .collect();
+    let job = store.new_job("源码编译 openvpn 2.7.9".into(), labels).await;
     job.set(B_STEP_DEPS, "failed", "dependency install failed")
         .await;
-    job.finish().await;
+    job.clone().finish().await;
     let view = job.view().await;
     assert_eq!(view.status, "failed");
     assert_eq!(view.steps[B_STEP_DEPS].status, "failed");

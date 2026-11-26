@@ -47,7 +47,11 @@ impl Job {
     }
 
     pub fn finish(&mut self) {
-        self.status = "done".into();
+        self.status = if self.steps.iter().any(|step| step.status == "failed") {
+            "failed".into()
+        } else {
+            "done".into()
+        };
         self.done = Utc::now();
     }
 

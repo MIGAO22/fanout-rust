@@ -428,8 +428,8 @@ pub async fn client_openvpn_repo(Query(q): Query<OffQuery>) -> Response {
     }
 }
 
-pub async fn client_openvpn_build() -> Response {
-    match crate::clients::start_openvpn_source_build().await {
+pub async fn client_openvpn_build(State(state): State<Arc<AppState>>) -> Response {
+    match crate::clients::start_openvpn_source_build(state.manager.jobs.clone()).await {
         Ok(job) => Json(json!({"ok": true, "job": job.view().await.id,
             "message": "已在后台开始编译，进度在这张卡和出口页的作业卡片里"}))
         .into_response(),
@@ -447,16 +447,46 @@ pub async fn client_openvpn_source(Query(q): Query<OffQuery>) -> Response {
     }
 }
 
-pub async fn xui_status() -> impl IntoResponse {
-    Json(json!({"available": false, "kind": "native", "reason": "Rust 版正在移植"}))
-}
-
-pub async fn not_implemented() -> impl IntoResponse {
-    error(StatusCode::NOT_IMPLEMENTED, "Rust 版正在移植")
-}
-
-pub async fn sub() -> impl IntoResponse {
-    error(StatusCode::NOT_IMPLEMENTED, "Rust 版正在移植")
+pub async fn client_warp_apply(State(state): State<Arc<AppState>>) -> Response {
+    let settings = state.manager.settings().await;
+    if !settings.warp().enabled {
+        return error(StatusCode::CONFLICT, "中转还没打开，开了才谈得上重新注册");
+    }
+    let tunnels = state.manager.tunnels().await;
+    if tunnels.is_empty() {
+        return error(StatusCode::CONFLICT, "现在没有出口，没有可重新注册的线路");
+    }
+    let mut labels = Vec::with_capacity(tunnels.len() + 1);
+    if !crate::clients::has_cmd("wg") {
+        labels.push("装 wireguard-tools".into());
+    }
+    for tunnel in &tunnels {
+        labels.push(format!("出口 {} · {}", tunnel.slot, tunnel.host().await));
+    }
+    let job = state
+        .manager
+        .jobs
+        .new_job(
+            format!("按最新客户端版本重新注册 WARP（{} 条出口）", tunnels.len()),
+            labels,
+        )
+        .await;
+    let warp = state.warp.clone();
+    let manager = state.manager.clone();
+    let background = job.clone();
+    tokio::spawn(async move {
+        if let Err(err) = warp.reregister(&manager, background.clone()).await {
+            tracing::warn!("重新注册 WARP 失败: {err}");
+            background.set(0, "failed", &err.to_string()).await;
+            background.finish().await;
+        }
+    });
+    Json(json!({
+        "ok": true,
+        "job": job.id(),
+        "message": "正在按最新客户端版本重新注册 WARP：每条出口会换一对密钥、拿到一个新的 Cloudflare 接入，出口 IP 不变"
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]

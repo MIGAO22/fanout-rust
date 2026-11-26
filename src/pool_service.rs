@@ -834,7 +834,12 @@ impl PoolService {
         true
     }
 
-    async fn fill_one(&self, pool: &Pool, node: crate::models::Node, old_host: &str) -> Result<()> {
+    async fn fill_one(
+        &self,
+        pool: &Pool,
+        node: crate::models::Node,
+        old_host: &str,
+    ) -> Result<(), String> {
         let tunnel = match self.inner.manager.start(node.clone()).await {
             Ok(tunnel) => tunnel,
             Err(err) => {

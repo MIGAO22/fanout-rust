@@ -8,7 +8,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -33,9 +33,10 @@ use tokio::sync::Mutex;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+use crate::jobs::JobHandle;
+use crate::models::ClientBinStatus;
 pub use crate::models::UpdateStatus;
-use crate::models::{ClientBinStatus, JobStep, JobView};
-use crate::util::{atomic_write, first_line, one_line, path_string, random_token, write_file};
+use crate::util::{atomic_write, first_line, path_string, write_file};
 
 #[cfg(test)]
 #[path = "clients_test.rs"]
@@ -439,13 +440,13 @@ pub fn copy_file_mode(source: &Path, destination: &Path, mode: u32) -> Result<()
 pub fn restart_self() {
     if has_cmd("systemctl") && dir_exists(Path::new("/run/systemd/system")) {
         let _ = Command::new("systemctl")
-            .args(["restart", "fanout"])
+            .args(["restart", "fanout-rust"])
             .spawn();
         return;
     }
     if has_cmd("rc-service") {
         let _ = Command::new("rc-service")
-            .args(["fanout", "restart"])
+            .args(["fanout-rust", "restart"])
             .spawn();
         return;
     }
@@ -2232,64 +2233,7 @@ impl Drop for SourceBuildLockGuard {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct SourceBuildJob {
-    inner: Arc<Mutex<JobView>>,
-}
-
-impl SourceBuildJob {
-    pub fn new(version: &str) -> Self {
-        let now: DateTime<Utc> = Utc::now();
-        let labels: Vec<String> = OPENVPN_BUILD_STEPS
-            .iter()
-            .map(|label| (*label).to_string())
-            .collect();
-        let total = labels.len();
-        let view = JobView {
-            id: random_token(12),
-            summary: format!("源码编译 openvpn {version}"),
-            status: "running".into(),
-            steps: labels
-                .into_iter()
-                .map(|label| JobStep {
-                    label,
-                    status: "pending".into(),
-                    detail: String::new(),
-                })
-                .collect(),
-            started: now,
-            done: now,
-            total,
-        };
-        Self {
-            inner: Arc::new(Mutex::new(view)),
-        }
-    }
-
-    pub async fn set(&self, index: usize, status: &str, detail: &str) {
-        let mut view = self.inner.lock().await;
-        if let Some(step) = view.steps.get_mut(index) {
-            step.status = status.into();
-            step.detail = one_line(detail, 500);
-        }
-    }
-
-    pub async fn finish(&self) {
-        let mut view = self.inner.lock().await;
-        view.status = if view.steps.iter().any(|step| step.status == "failed") {
-            "failed".into()
-        } else {
-            "done".into()
-        };
-        view.done = Utc::now();
-    }
-
-    pub async fn view(&self) -> JobView {
-        self.inner.lock().await.clone()
-    }
-}
-
-pub async fn start_openvpn_source_build() -> Result<SourceBuildJob> {
+pub async fn start_openvpn_source_build(jobs: Arc<crate::jobs::JobStore>) -> Result<JobHandle> {
     if !ovpn_build_start() {
         bail!("已经有一个编译在跑了，等它结束");
     }
@@ -2319,7 +2263,13 @@ pub async fn start_openvpn_source_build() -> Result<SourceBuildJob> {
         Ok(prepared) => prepared,
         Err(error) => return Err(error),
     };
-    let job = SourceBuildJob::new(&version);
+    let labels = OPENVPN_BUILD_STEPS
+        .iter()
+        .map(|label| (*label).to_string())
+        .collect();
+    let job = jobs
+        .new_job(format!("源码编译 openvpn {version}"), labels)
+        .await;
     let background = job.clone();
     tokio::spawn(async move {
         let _build_guard = build_guard;
@@ -2329,7 +2279,7 @@ pub async fn start_openvpn_source_build() -> Result<SourceBuildJob> {
 }
 
 pub async fn run_openvpn_source_build(
-    job: &SourceBuildJob,
+    job: &JobHandle,
     version: &str,
     tar_url: &str,
     asc_url: &str,
@@ -2339,7 +2289,7 @@ pub async fn run_openvpn_source_build(
         ($job:expr, $version:expr, $step:expr, $($arg:tt)*) => {{
             $job.set($step, "failed", &format!($($arg)*)).await;
             cleanup_openvpn_source_build($version);
-            $job.finish().await;
+            $job.clone().finish().await;
             return;
         }};
     }
@@ -2615,7 +2565,7 @@ pub async fn run_openvpn_source_build(
         &format!("{version} → {bin}（apt 那份 {apt_version} 原地没动）"),
     )
     .await;
-    job.finish().await;
+    job.clone().finish().await;
 }
 
 pub fn openvpn_can_build_source(

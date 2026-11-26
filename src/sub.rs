@@ -28,7 +28,7 @@ pub fn reset_sub_token(dir: &Path) -> Result<String> {
 
 fn sub_token_value() -> String {
     let mut bytes = [0_u8; 20];
-    rand::thread_rng().fill(&mut bytes);
+    rand::thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 

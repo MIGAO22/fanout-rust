@@ -239,13 +239,30 @@ async fn main() -> Result<()> {
     } else {
         let canonical = format!("/{basepath}");
         let trailing = format!("{canonical}/");
-        Router::new().nest(&trailing, app).route(
-            &canonical,
-            get(move || {
-                let target = trailing.clone();
-                async move { axum::response::Redirect::permanent(&target) }
-            }),
-        )
+        let trailing_index = Router::new()
+            .route(&trailing, get(web::index))
+            .with_state(state.clone())
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                auth::require_auth,
+            ));
+        let redirect_from = canonical.clone();
+        let redirect_to = trailing.clone();
+        Router::new()
+            .nest(&canonical, app)
+            .merge(trailing_index)
+            .layer(axum::middleware::from_fn(
+                move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
+                    let from = redirect_from.clone();
+                    let to = redirect_to.clone();
+                    async move {
+                        if req.uri().path() == from {
+                            return axum::response::Redirect::permanent(&to).into_response();
+                        }
+                        next.run(req).await
+                    }
+                },
+            ))
     };
 
     let addr: SocketAddr = settings.read().await.listen().parse()?;

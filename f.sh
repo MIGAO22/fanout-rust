@@ -222,7 +222,7 @@ change_port() {
   if web_ready "$new" "$bp"; then
     echo -e "  ${G}已改为 ${new}，Web 已就绪${N}"
   else
-    echo -e "  ${R}配置已写入，但 Web 未在 30 秒内就绪${N}"
+    echo -e "  ${R}配置已写入，但等待 Web 就绪超时${N}"
     svc_logs 20
   fi
 }
@@ -281,7 +281,7 @@ reset_basepath() {
   if web_ready "$port" "$bp"; then
     echo -e "  ${G}新路径已生效: /${bp}/${N}"
   else
-    echo -e "  ${R}配置已写入，但 Web 未在 30 秒内就绪${N}"
+    echo -e "  ${R}配置已写入，但等待 Web 就绪超时${N}"
     svc_logs 20
   fi
 }
@@ -377,7 +377,7 @@ do_update() {
   bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
   echo "  等待 Web 服务就绪..."
   if ! web_ready "$port" "$bp"; then
-    echo -e "  ${R}新版已安装，但 Web 未在 30 秒内就绪${N}"
+    echo -e "  ${R}新版已安装，但等待 Web 就绪超时${N}"
     svc_logs 20
     rm -rf "$tmp"
     return

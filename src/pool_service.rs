@@ -1225,6 +1225,7 @@ async fn accept_loop(
                     Err(error) => {
                         warn!("出口组 {id} 接受连接失败，稍后重试: {error}");
                         sleep(Duration::from_millis(100)).await;
+                        continue;
                     }
                 };
                 // Missing pools must be dropped, not served with AUTH_NONE.

@@ -828,6 +828,10 @@ impl Manager {
             tokio::time::sleep(Duration::from_secs(s.conn.health_interval)).await;
             let warp_enabled = s.warp().enabled;
             let tunnels = self.tunnels().await;
+            let active_slots: HashSet<_> = tunnels.iter().map(|tunnel| tunnel.slot).collect();
+            if let Err(error) = warp.prune(&active_slots).await {
+                tracing::warn!("清理停止槽位的 WARP 注册失败: {error}");
+            }
             let sem = Arc::new(Semaphore::new(8));
             let mut tasks = Vec::new();
             for t in tunnels {

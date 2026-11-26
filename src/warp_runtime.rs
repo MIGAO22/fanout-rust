@@ -206,6 +206,32 @@ impl WarpService {
         self.save(&accounts).await
     }
 
+    pub async fn prune(&self, active_slots: &std::collections::HashSet<usize>) -> Result<()> {
+        let _permit = self
+            .lock
+            .acquire()
+            .await
+            .map_err(|_| anyhow::anyhow!("WARP 服务已关闭"))?;
+        let removed = {
+            let mut accounts = self.accounts.lock().await;
+            let removed: Vec<_> = accounts
+                .iter()
+                .filter(|account| !active_slots.contains(&account.slot))
+                .cloned()
+                .collect();
+            if removed.is_empty() {
+                return Ok(());
+            }
+            accounts.retain(|account| active_slots.contains(&account.slot));
+            self.save(&accounts).await?;
+            removed
+        };
+        for account in removed {
+            unregister(&self.client, &account).await;
+        }
+        Ok(())
+    }
+
     pub async fn drop_all(&self) -> Result<()> {
         let _permit = self
             .lock

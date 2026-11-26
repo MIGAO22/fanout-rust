@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use std::{path::Path, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     io::AsyncWriteExt,

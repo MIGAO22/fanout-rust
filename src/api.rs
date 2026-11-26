@@ -46,7 +46,7 @@ pub async fn exits(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                     .enumerate()
                     .map(|(index, exit)| (crate::panel_native::sanitize_tag(&exit.host), index))
                     .collect();
-                let mut by_pool: HashMap<_, _> = pools
+                let by_pool: HashMap<_, _> = pools
                     .iter()
                     .enumerate()
                     .flat_map(|(index, pool)| {

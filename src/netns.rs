@@ -686,7 +686,7 @@ pub async fn wait_tun_up(process: &OvpnProc, namespace: &str, budget: Duration) 
 
         tokio::select! {
             result = process.wait_for_exit() => {
-                return match result {
+                match result {
                     Err(error) => bail!("openvpn 退出: {error}"),
                     Ok(()) => bail!("openvpn 意外结束"),
                 };

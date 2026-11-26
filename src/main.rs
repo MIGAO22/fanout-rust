@@ -172,6 +172,7 @@ async fn main() -> Result<()> {
     if let Err(e) = manager.restore().await {
         tracing::warn!("恢复隧道状态失败: {e}");
     }
+    state.pools.start_fill_task();
     let health_manager = manager.clone();
     tokio::spawn(async move {
         health_manager.health_loop().await;

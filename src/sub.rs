@@ -1,6 +1,6 @@
 use crate::{
     config::{load_settings, save_settings, WebSettings},
-    util::{atomic_write, random_token, read_trim},
+    util::{atomic_write, read_trim},
 };
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine as _};

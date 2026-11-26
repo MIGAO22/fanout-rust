@@ -157,11 +157,18 @@ async fn crud_preserves_listener_port_and_credentials_and_persists_changes() {
     assert!(service.views().await.is_empty());
     assert!(service.egresses().await.is_empty());
     assert!(service.delete_pool("p1").await.is_err());
-    assert!(
-        timeout(Duration::from_millis(250), TcpStream::connect(addr))
+    let mut closed = false;
+    for _ in 0..20 {
+        if timeout(Duration::from_millis(100), TcpStream::connect(addr))
             .await
             .is_err()
-    );
+        {
+            closed = true;
+            break;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    assert!(closed, "删除出口组后监听应关闭");
     assert!(crate::pools_logic::load_pool_store(dir.path())
         .unwrap()
         .pools

@@ -307,10 +307,8 @@ impl PoolService {
         }
 
         let shutdown = service.inner.shutdown.clone();
-        let task = tokio::spawn(probe_loop(service.clone(), shutdown.clone()));
+        let task = tokio::spawn(probe_loop(service.clone(), shutdown));
         *lock_unpoisoned(&service.inner.probe_task) = Some(task);
-        let fill_task = tokio::spawn(fill_loop(service.clone(), shutdown));
-        *lock_unpoisoned(&service.inner.fill_task) = Some(fill_task);
         Ok(service)
     }
 
@@ -706,6 +704,17 @@ impl PoolService {
                 });
             }
         }
+    }
+
+    /// Starts autofill after persisted tunnels have been restored.
+    pub fn start_fill_task(&self) {
+        if self.inner.closed.load(Ordering::SeqCst)
+            || lock_unpoisoned(&self.inner.fill_task).is_some()
+        {
+            return;
+        }
+        let task = tokio::spawn(fill_loop(self.clone(), self.inner.shutdown.clone()));
+        *lock_unpoisoned(&self.inner.fill_task) = Some(task);
     }
 
     /// Runs one autofill pass. A previous pass that is still connecting a new

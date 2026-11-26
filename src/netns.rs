@@ -412,6 +412,23 @@ impl NetnsDialer {
         }
     }
 
+    pub async fn resolve_ipv4(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+        if let Ok(ip) = host.parse::<Ipv4Addr>() {
+            return Ok(vec![SocketAddr::from((ip, port))]);
+        }
+        let budget = self.timeout;
+        let namespace = self.namespace.clone();
+        let host = host.to_string();
+        let mut receiver = self.spawn_in_netns(move || resolve_ipv4((host, port), budget))?;
+        let addresses = timeout(budget, &mut receiver)
+            .await
+            .map_err(|_| anyhow!("在 netns {namespace} 内 DNS 解析超时"))?
+            .context("netns DNS 线程异常退出")?;
+        let addresses =
+            addresses.map_err(|error| anyhow!("在 netns {namespace} 内 DNS 解析失败: {error}"))?;
+        Ok(addresses)
+    }
+
     pub async fn dial_tcp_host(&self, host: impl Into<String>, port: u16) -> Result<TcpStream> {
         self.dial_tcp((host.into(), port)).await
     }

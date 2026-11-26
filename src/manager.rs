@@ -77,6 +77,23 @@ impl Tunnel {
         }
     }
 
+    pub async fn state_if_host(&self, hosts: &HashSet<&str>) -> Option<TunnelState> {
+        let i = self.inner.lock().await;
+        if !hosts.contains(i.node.hostname.as_str()) {
+            return None;
+        }
+        Some(TunnelState {
+            slot: self.slot,
+            port: self.port,
+            node: i.node.clone(),
+            status: i.status.clone(),
+            exit_ip: i.exit_ip.clone(),
+            err: i.err.clone(),
+            since: i.since,
+            cred: self.cred.read().await.clone(),
+        })
+    }
+
     pub async fn persisted(&self) -> PersistedTunnel {
         let i = self.inner.lock().await;
         let cred = self.cred.read().await.clone();

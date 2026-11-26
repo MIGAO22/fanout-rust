@@ -976,9 +976,12 @@ impl PoolService {
         };
         // Resolve the manager before taking any service-state lock. This keeps
         // the lock direction opposite to the one used by Go's port registry.
+        let wanted: HashSet<&str> = pool.hosts.iter().map(String::as_str).collect();
         let mut by_host: HashMap<String, ResolvedTunnel> = HashMap::new();
         for tunnel in self.inner.manager.tunnels().await {
-            let state = tunnel.state().await;
+            let Some(state) = tunnel.state_if_host(&wanted).await else {
+                continue;
+            };
             let dialer = tunnel.runtime.socks_dialer();
             by_host.insert(
                 state.node.hostname.clone(),

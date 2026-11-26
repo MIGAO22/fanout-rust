@@ -47,13 +47,23 @@ const EXIT_IP_ORACLES: &[&str] = &[
 const DNS_CACHE_TTL: Duration = Duration::from_secs(60);
 const DNS_CACHE_LIMIT: usize = 4096;
 
-static DNS_CACHE: OnceLock<StdMutex<HashMap<String, (Vec<SocketAddr>, Instant)>>> = OnceLock::new();
+type DnsCacheKey = (String, String, u16);
+type DnsCache = StdMutex<HashMap<DnsCacheKey, (Vec<SocketAddr>, Instant)>>;
 
-fn dns_cache() -> &'static StdMutex<HashMap<String, (Vec<SocketAddr>, Instant)>> {
+static DNS_CACHE: OnceLock<DnsCache> = OnceLock::new();
+
+fn dns_cache() -> &'static DnsCache {
     DNS_CACHE.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
-async fn resolve_ipv4_targets(addr: &str) -> Result<Vec<SocketAddr>> {
+fn cached_ipv4_targets(key: &DnsCacheKey) -> Option<Vec<SocketAddr>> {
+    lock_unpoisoned(dns_cache())
+        .get(key)
+        .filter(|(_, at)| at.elapsed() < DNS_CACHE_TTL)
+        .map(|(addresses, _)| addresses.clone())
+}
+
+async fn resolve_ipv4_targets(dialer: &NetnsDialer, addr: &str) -> Result<Vec<SocketAddr>> {
     let (host, port) = addr
         .rsplit_once(':')
         .ok_or_else(|| anyhow!("目标地址格式错误: {addr}"))?;
@@ -63,26 +73,19 @@ async fn resolve_ipv4_targets(addr: &str) -> Result<Vec<SocketAddr>> {
     if let Ok(ip) = host.parse::<Ipv4Addr>() {
         return Ok(vec![SocketAddr::from((ip, port))]);
     }
-    if let Some(cached) = lock_unpoisoned(dns_cache())
-        .get(host)
-        .filter(|(_, at)| at.elapsed() < DNS_CACHE_TTL)
-        .map(|(addresses, _)| addresses.clone())
-    {
+    let key = (dialer.namespace().to_string(), host.to_string(), port);
+    if let Some(cached) = cached_ipv4_targets(&key) {
         return Ok(cached);
     }
-    let addresses = tokio::net::lookup_host((host, port))
+    let addresses = dialer
+        .resolve_ipv4(host, port)
         .await
-        .with_context(|| format!("解析目标 {addr} 失败"))?
-        .filter(|address| matches!(address, SocketAddr::V4(_)))
-        .collect::<Vec<_>>();
-    if addresses.is_empty() {
-        bail!("目标 {addr} 没有 IPv4 地址");
-    }
+        .with_context(|| format!("解析目标 {addr} 失败"))?;
     let mut cache = lock_unpoisoned(dns_cache());
     if cache.len() >= DNS_CACHE_LIMIT {
         cache.clear();
     }
-    cache.insert(host.to_string(), (addresses.clone(), Instant::now()));
+    cache.insert(key, (addresses.clone(), Instant::now()));
     Ok(addresses)
 }
 
@@ -99,7 +102,7 @@ pub struct NetnsSocksDialer {
 #[async_trait]
 impl SocksDialer for NetnsSocksDialer {
     async fn dial(&self, network: DialNetwork, addr: &str) -> Result<DialSocket> {
-        let targets = resolve_ipv4_targets(addr).await?;
+        let targets = resolve_ipv4_targets(&self.dialer, addr).await?;
         if network == DialNetwork::Udp {
             let target = targets
                 .first()
@@ -129,6 +132,7 @@ pub struct LinuxTunnelRuntime {
     dir: PathBuf,
     instance: Instance,
     netns: Netns,
+    socks_dialer: OnceLock<Arc<dyn SocksDialer>>,
     settings: Arc<RwLock<WebSettings>>,
     warp: Option<Arc<WarpService>>,
     node: RwLock<Option<Node>>,
@@ -157,6 +161,7 @@ impl LinuxTunnelRuntime {
             dir: dir.to_path_buf(),
             instance,
             netns,
+            socks_dialer: OnceLock::new(),
             settings,
             warp,
             node: RwLock::new(None),
@@ -405,9 +410,13 @@ impl TunnelRuntime for LinuxTunnelRuntime {
     }
 
     fn socks_dialer(&self) -> Arc<dyn SocksDialer> {
-        Arc::new(NetnsSocksDialer {
-            dialer: NetnsDialer::new(self.netns.name()),
-        })
+        self.socks_dialer
+            .get_or_init(|| {
+                Arc::new(NetnsSocksDialer {
+                    dialer: NetnsDialer::new(self.netns.name()),
+                })
+            })
+            .clone()
     }
 
     async fn healthy(&self) -> bool {
@@ -484,11 +493,34 @@ mod tests {
 
     #[tokio::test]
     async fn numeric_targets_skip_dns_and_reject_bad_ports() {
-        let targets = resolve_ipv4_targets("1.2.3.4:443").await.unwrap();
+        let dialer = NetnsDialer::new("missing-test-netns");
+        let targets = resolve_ipv4_targets(&dialer, "1.2.3.4:443").await.unwrap();
         assert_eq!(
             targets,
             vec![SocketAddr::from((Ipv4Addr::new(1, 2, 3, 4), 443))]
         );
-        assert!(resolve_ipv4_targets("1.2.3.4:not-a-port").await.is_err());
+        assert!(resolve_ipv4_targets(&dialer, "1.2.3.4:not-a-port")
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn dns_cache_separates_namespaces_and_ports() {
+        let key = (
+            "cache-test-netns".to_string(),
+            "example.invalid".to_string(),
+            443,
+        );
+        let addresses = vec![SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 443))];
+        {
+            let mut cache = lock_unpoisoned(dns_cache());
+            cache.insert(key.clone(), (addresses.clone(), Instant::now()));
+        }
+        assert_eq!(cached_ipv4_targets(&key), Some(addresses));
+        assert!(cached_ipv4_targets(&(key.0.clone(), key.1.clone(), 80)).is_none());
+        assert!(
+            cached_ipv4_targets(&("other-test-netns".to_string(), key.1.clone(), key.2)).is_none()
+        );
+        lock_unpoisoned(dns_cache()).remove(&key);
     }
 }

@@ -1,7 +1,7 @@
 use axum::{
     extract::Path,
     http::{header, StatusCode},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
 };
 use rust_embed::RustEmbed;
 
@@ -12,7 +12,10 @@ pub struct Assets;
 pub async fn index() -> Response {
     match Assets::get("index.html") {
         Some(f) => (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+            ],
             f.data.into_owned(),
         )
             .into_response(),
@@ -20,10 +23,17 @@ pub async fn index() -> Response {
     }
 }
 
-pub async fn login_page() -> Html<String> {
+pub async fn login_page() -> Response {
     match Assets::get("login.html") {
-        Some(f) => Html(String::from_utf8_lossy(&f.data).to_string()),
-        None => Html("<h1>fanout-rust</h1><p>login.html missing</p>".into()),
+        Some(f) => (
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+            ],
+            String::from_utf8_lossy(&f.data).to_string(),
+        )
+            .into_response(),
+        None => (StatusCode::INTERNAL_SERVER_ERROR, "login.html missing").into_response(),
     }
 }
 
@@ -45,7 +55,14 @@ pub async fn asset(Path(path): Path<String>) -> Response {
             } else {
                 "application/octet-stream"
             };
-            ([(header::CONTENT_TYPE, mime)], f.data.into_owned()).into_response()
+            (
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (header::CACHE_CONTROL, "no-cache, no-store, must-revalidate"),
+                ],
+                f.data.into_owned(),
+            )
+                .into_response()
         }
         None => (StatusCode::NOT_FOUND, "not found").into_response(),
     }

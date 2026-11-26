@@ -1405,9 +1405,10 @@ async function openDetail(id){
 // ownerOf 找一条入站挂在哪个出口上：先看单出口，再看出口组。
 // 返回 null 表示没绑，走直连。
 function ownerOf(id){
-  const e = (view.exits || []).find(x => (x.inbounds || []).some(i => i.id === id));
+  const key = String(id);
+  const e = (view.exits || []).find(x => (x.inbounds || []).some(i => String(i.id) === key));
   if(e) return {kind: 'exit', ref: e};
-  const p = (view.pools || []).find(x => (x.inbounds || []).some(i => i.id === id));
+  const p = (view.pools || []).find(x => (x.inbounds || []).some(i => String(i.id) === key));
   if(p) return {kind: 'pool', ref: p};
   return null;
 }
@@ -1438,30 +1439,41 @@ function refreshDetailOwner(){
   if(!curDetail) return;
   const el = $('#downer');
   if(!el) return;
-  const bound = curDetail.bound_to || '';
+  const bound = boundValue(curDetail.bound_to);
   const pool = bound ? (view.pools || []).find(p => p.identity === bound) : null;
   const exit = bound ? (view.exits || []).find(e => e.host === bound) : null;
   const owner = pool ? {kind:'pool', ref:pool} : (exit ? {kind:'exit', ref:exit} : null);
   el.innerHTML = ownerBadge(owner);
 }
 
+function boundValue(value){
+  const bound = String(value || '');
+  return bound.startsWith('fanout-') ? bound.slice(7) : bound;
+}
+
 // 出口下拉：列出所有已连通的隧道，外加「直连」。绑定按 Xray 的 inboundTag 走。
 function exitOptions(currentHost){
+  const current = boundValue(currentHost);
   const up = (view.exits || []).filter(e => e.status === 'up');
   // 出口组排在单出口之前：会去看这个下拉的人多半正是为了保活才来的
   const pools = (view.pools || []).filter(p => p.running && p.up > 0);
   const pg = pools.length
     ? '<optgroup label="出口组（组内自动选路）">'
       + pools.map(p => '<option value="' + esc(p.identity) + '"'
-          + (p.identity === currentHost ? ' selected' : '') + '>'
+          + (p.identity === current ? ' selected' : '') + '>'
           + esc(p.name + ' · ' + p.mode_label + ' · ' + p.up + '/' + p.total) + '</option>').join('')
       + '</optgroup>'
     : '';
-  return '<option value=""' + (currentHost ? '' : ' selected') + '>直连（不走隧道）</option>'
+  const known = current && (pools.some(p => p.identity === current) || up.some(e => e.host === current));
+  const fallback = current && !known
+    ? '<option value="' + esc(current) + '" selected>当前出口（' + esc(current) + '，暂不可用）</option>'
+    : '';
+  return fallback
+    + '<option value=""' + (current ? '' : ' selected') + '>直连（不走隧道）</option>'
     + pg
     + '<optgroup label="单出口">'
     + up.map(e => '<option value="' + esc(e.host) + '"'
-        + (e.host === currentHost ? ' selected' : '') + '>'
+        + (e.host === current ? ' selected' : '') + '>'
         + esc((e.exit_ip || e.host) + ' · ' + (e.country || e.region)) + '</option>').join('')
     + '</optgroup>';
 }
@@ -1495,7 +1507,7 @@ function renderDetail(d){
       '<dl class="kvs">'
     + '<dt>当前出口</dt><dd><span id="downer"></span></dd>'
     + '<dt>改绑到</dt><dd><select class="inp" id="dbind" data-tag="' + esc(d.tag) + '" '
-    +   'style="max-width:280px;height:29px;font-size:12.5px">' + exitOptions(d.bound_to || '') + '</select></dd>'
+    +   'style="max-width:280px;height:29px;font-size:12.5px">' + exitOptions(boundValue(d.bound_to)) + '</select></dd>'
     + '<dt>协议</dt><dd>' + tlsLine + '</dd>'
     + '<dt>监听</dt><dd>' + esc(d.listen || '0.0.0.0') + '</dd>'
     + '<dt>inboundTag</dt><dd>' + esc(d.tag) + '</dd>'

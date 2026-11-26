@@ -392,6 +392,14 @@ impl Manager {
                 i.avoid.push(old_host.clone());
             }
         }
+        if let Some(next) = self
+            .candidates_for(&t, false)
+            .await
+            .into_iter()
+            .find(|node| node.hostname != old_host)
+        {
+            t.set_node(next).await;
+        }
         self.persist().await.ok();
         let m = self.clone();
         tokio::spawn(async move {

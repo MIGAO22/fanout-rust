@@ -163,20 +163,30 @@ list_tunnels() {
     > "$ck.json" 2>/dev/null
   rm -f "$ck"
 
-  # 用 sed/awk 解析而不是 python3/jq：Alpine 最小安装两者都没有，
-  # 为了一条列表命令再拉依赖不值当。字段固定，按对象拆行足够稳。
+  # 用 awk 而不是 python3/jq：Alpine 最小安装两者都没有。
+  # 一次扫描完成字段提取，避免每条隧道为每个字段再启动一个进程。
   if [[ ! -s "$ck.json" ]] || ! grep -q '"port"' "$ck.json" 2>/dev/null; then
     echo "  还没有隧道，去网页里添加"
   else
     printf "  %-10s%-11s%-18s%s\n" "端口" "状态" "出口 IP" "节点"
-    # 按 {"slot" 切分而不是按 }：node 是嵌套对象，按 } 切会把一条记录劈成两半
-    sed 's/{"slot"/\n{"slot"/g' "$ck.json" | while IFS= read -r line; do
-      case "$line" in *'"slot"'*) ;; *) continue ;; esac
-      p=$(echo "$line"  | sed -n 's/.*"port":\([0-9]*\).*/\1/p')
-      st=$(echo "$line" | sed -n 's/.*"status":"\([^"]*\)".*/\1/p')
-      ip=$(echo "$line" | sed -n 's/.*"exit_ip":"\([^"]*\)".*/\1/p')
-      hn=$(echo "$line" | sed -n 's/.*"hostname":"\([^"]*\)".*/\1/p')
-      [[ -z $p ]] && continue
+    awk '
+      function value(pattern, line, text) {
+        if (!match(line, pattern)) return "-"
+        text = substr(line, RSTART, RLENGTH)
+        sub(/^[^:]*:/, "", text)
+        gsub(/^"|"$/, "", text)
+        return text
+      }
+      BEGIN { RS = "\\{\"slot\""; OFS = "\t" }
+      {
+        port = value("\"port\":[0-9]+", $0)
+        if (port == "-" || port == "") next
+        status = value("\"status\":\"[^\"]*\"", $0)
+        exit_ip = value("\"exit_ip\":\"[^\"]*\"", $0)
+        hostname = value("\"hostname\":\"[^\"]*\"", $0)
+        print port, status, exit_ip, hostname
+      }
+    ' "$ck.json" | while IFS=$'\t' read -r p st ip hn; do
       printf "  %-10s%-11s%-18s%s\n" "$p" "${st:--}" "${ip:--}" "${hn:--}"
     done
   fi

@@ -223,6 +223,7 @@ impl WarpService {
         for command in cmds {
             if command.first().map(String::as_str) == Some("ip")
                 && command.get(1).map(String::as_str) == Some("route")
+                && command.get(3).is_some_and(|target| target.ends_with("/32"))
             {
                 routes.push(command);
             } else {

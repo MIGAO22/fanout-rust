@@ -76,3 +76,7 @@ pub fn settings_with_token(mut s: WebSettings, token: String) -> WebSettings {
     s.sub_token = Some(token);
     s
 }
+
+#[cfg(test)]
+#[path = "sub_test.rs"]
+mod tests;

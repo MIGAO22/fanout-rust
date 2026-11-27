@@ -2,7 +2,7 @@
 # fanout-rust 管理菜单
 set -uo pipefail
 
-WORK_DIR=/var/lib/fanout
+WORK_DIR="${WORK_DIR:-}"
 SERVICE=fanout-rust
 BIN=/usr/local/bin/fanout-rust
 # 本仓库构建的更新来源。绝不能默认指向上游：菜单里一次「更新」就会把
@@ -23,6 +23,10 @@ else
   INIT_SYS=openrc
   UNIT=/etc/init.d/${SERVICE}
 fi
+if [[ -z $WORK_DIR && -f $UNIT ]]; then
+  WORK_DIR=$(sed -n 's/.*-dir \([^ ]*\).*/\1/p' "$UNIT" | head -1)
+fi
+WORK_DIR=${WORK_DIR:-/var/lib/fanout}
 
 svc_start()   { [[ $INIT_SYS == systemd ]] && systemctl start "$SERVICE"   || rc-service "$SERVICE" start; }
 svc_stop()    { [[ $INIT_SYS == systemd ]] && systemctl stop "$SERVICE"    || rc-service "$SERVICE" stop; }
@@ -334,7 +338,7 @@ migrate_port_to_settings() {
     printf '{\n  "port": %s,\n  "listen_addr": ""\n}\n' "$unit_port" > "$WORK_DIR/settings.json"
     chmod 600 "$WORK_DIR/settings.json"
   fi
-  sed -i "s/-web ${unit_port} //" "$UNIT"
+  sed -i -E "s/-web [0-9]+( |$)//" "$UNIT"
   svc_reload
   echo "  已把端口 ${unit_port} 迁移到 settings.json"
 }
@@ -382,6 +386,8 @@ do_update() {
       "$tmp/fanout-rust.service" > "$UNIT.new.$$"
     mv -f "$UNIT.new.$$" "$UNIT"
     svc_reload
+  elif [[ $INIT_SYS == openrc && -f $UNIT ]]; then
+    sed -i "s#^command_args=.*#command_args=\"-dir ${WORK_DIR}\"#" "$UNIT"
   fi
   migrate_port_to_settings
   svc_start

@@ -23,6 +23,8 @@ use crate::{
 
 pub const SESSION_COOKIE: &str = "fanout_session";
 const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(300);
+const AUTH_FAILURE_MAX_IPS: usize = 4096;
 
 struct Failures {
     count: u32,
@@ -76,23 +78,29 @@ impl Auth {
     }
 
     async fn blocked(&self, ip: &str) -> bool {
-        let mut f = self.failures.lock().await;
-        if let Some(v) = f.get_mut(ip) {
-            if v.at.elapsed() > Duration::from_secs(300) {
-                f.remove(ip);
+        let mut failures = self.failures.lock().await;
+        if let Some(failure) = failures.get_mut(ip) {
+            if failure.at.elapsed() > AUTH_FAILURE_WINDOW {
+                failures.remove(ip);
                 return false;
             }
-            v.count >= 5
+            failure.count >= 5
         } else {
             false
         }
     }
 
     async fn record_fail(&self, ip: &str) {
-        let mut f = self.failures.lock().await;
-        let v = f.entry(ip.to_string()).or_default();
-        v.count += 1;
-        v.at = Instant::now();
+        let mut failures = self.failures.lock().await;
+        if failures.len() >= AUTH_FAILURE_MAX_IPS {
+            failures.retain(|_, failure| failure.at.elapsed() <= AUTH_FAILURE_WINDOW);
+            if failures.len() >= AUTH_FAILURE_MAX_IPS {
+                failures.clear();
+            }
+        }
+        let failure = failures.entry(ip.to_string()).or_default();
+        failure.count += 1;
+        failure.at = Instant::now();
     }
 
     async fn clear_fails(&self, ip: &str) {
@@ -132,8 +140,13 @@ impl Auth {
 }
 
 fn client_ip(headers: &HeaderMap, peer: IpAddr) -> String {
-    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        return v.split(',').next().unwrap_or(v).trim().to_string();
+    if std::env::var("FANOUT_TRUST_PROXY").is_ok_and(|value| value == "1") {
+        if let Some(value) = headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+        {
+            return value.split(',').next().unwrap_or(value).trim().to_string();
+        }
     }
     peer.to_string()
 }

@@ -1087,7 +1087,7 @@ impl PoolFillState {
     pub fn merge_dead(
         &mut self,
         id: &str,
-        ledger: HashMap<String, DateTime<Utc>>,
+        mut ledger: HashMap<String, DateTime<Utc>>,
         store: &PoolStore,
     ) {
         if let Some(pool) = store.get(id) {

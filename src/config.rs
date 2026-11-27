@@ -1,6 +1,11 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{fs, net::IpAddr, path::Path};
+use std::{
+    fs,
+    net::IpAddr,
+    path::Path,
+    sync::{Mutex, OnceLock},
+};
 
 pub const DEFAULT_PORT: u16 = 8899;
 pub const DEFAULT_HEALTH_INTERVAL: u64 = 10;
@@ -14,6 +19,12 @@ pub const DEFAULT_PANEL_DEBOUNCE: u64 = 1500;
 pub const DEFAULT_NODE_TTL: u64 = 600;
 pub const DEFAULT_RECONNECT_LIMIT: usize = 2;
 pub const DEFAULT_WARP_HANDSHAKE_TIMEOUT: u64 = 5;
+
+static SETTINGS_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub fn settings_file_lock() -> &'static Mutex<()> {
+    SETTINGS_FILE_LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WebSettings {

@@ -8,6 +8,9 @@ use rand::RngCore;
 use std::path::Path;
 
 pub fn sub_token(dir: &Path) -> Result<String> {
+    let _guard = crate::config::settings_file_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let mut s = load_settings(dir, crate::config::DEFAULT_PORT, false)?;
     if let Some(t) = s.sub_token.as_ref().filter(|t| !t.is_empty()) {
         return Ok(t.clone());
@@ -19,6 +22,9 @@ pub fn sub_token(dir: &Path) -> Result<String> {
 }
 
 pub fn reset_sub_token(dir: &Path) -> Result<String> {
+    let _guard = crate::config::settings_file_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let mut s = load_settings(dir, crate::config::DEFAULT_PORT, false)?;
     let t = sub_token_value();
     s.sub_token = Some(t.clone());

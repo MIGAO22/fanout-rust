@@ -226,7 +226,12 @@ impl Manager {
 
     pub async fn update_settings(&self, next: WebSettings) -> Result<()> {
         let next = next.normalized();
-        crate::config::save_settings(&self.dir, &next)?;
+        {
+            let _file_guard = crate::config::settings_file_lock()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            crate::config::save_settings(&self.dir, &next)?;
+        }
         *self.settings.write().await = next;
         Ok(())
     }

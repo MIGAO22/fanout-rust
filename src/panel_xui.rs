@@ -434,10 +434,17 @@ impl XUI {
         if binds.is_empty() {
             return Ok(());
         }
+        let raw = self.raw_inbounds().await?;
+        self.bind_runtime_many_from_raw(binds, &raw).await
+    }
+
+    async fn bind_runtime_many_from_raw(
+        &self,
+        binds: &[(&str, &str)],
+        raw: &[Value],
+    ) -> Result<()> {
         let runtime = self.runtime().await;
-        let (list, xray) = tokio::join!(self.raw_inbounds(), self.load_xray());
-        let raw = list?;
-        let (mut setting, test_url) = xray?;
+        let (mut setting, test_url) = self.load_xray().await?;
         let known_tags: HashSet<String> = raw
             .iter()
             .map(|item| {
@@ -519,14 +526,29 @@ impl XUI {
                 .with_context(|| format!("复制到端口 {port} 失败"))?;
             created.push(port);
             new_ids.push(new_id);
-            pending.push((inbound_tag_of(port, &raw), egress_tag(host)));
+            pending.push((new_id, egress_tag(host)));
+        }
+        if new_ids.is_empty() {
+            return Ok(created);
         }
         self.attach_clients(&emails, &new_ids).await?;
-        let binds: Vec<(&str, &str)> = pending
+        let current = self.raw_inbounds().await?;
+        let mut resolved = Vec::with_capacity(pending.len());
+        for (id, outbound) in pending {
+            let item = find_raw_inbound(&current, id)?;
+            let stream = item.get("streamSettings").cloned().unwrap_or(Value::Null);
+            let tag = resolved_inbound_tag(
+                &scalar_string(item.get("tag")),
+                value_to_u16(item.get("port")),
+                &stream,
+            );
+            resolved.push((tag, outbound));
+        }
+        let binds: Vec<(&str, &str)> = resolved
             .iter()
             .map(|(inbound, outbound)| (inbound.as_str(), outbound.as_str()))
             .collect();
-        self.bind_runtime_many(&binds)
+        self.bind_runtime_many_from_raw(&binds, &current)
             .await
             .context("批量绑定新入站失败")?;
         Ok(created)
@@ -1547,10 +1569,6 @@ fn inbounds_from_raw(
             }
         })
         .collect()
-}
-
-fn inbound_tag_of(port: u16, template: &Map<String, Value>) -> String {
-    inbound_tag(port, template.get("streamSettings").unwrap_or(&Value::Null))
 }
 
 fn egress_tag(identity: &str) -> String {

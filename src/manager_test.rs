@@ -154,6 +154,17 @@ async fn stale_bring_up_cannot_mark_tunnel_up() {
 }
 
 #[tokio::test]
+async fn shutdown_stops_current_tunnels_and_rejects_new_starts() {
+    let temporary = tempfile::tempdir().unwrap();
+    let manager = manager(temporary.path());
+    manager.nodes.replace(vec![node("node-1")]).await;
+    let tunnel = manager.start(node("node-1")).await.unwrap();
+    manager.shutdown().await;
+    assert_eq!(tunnel.status().await, "stopped");
+    assert!(manager.start(node("node-2")).await.is_err());
+}
+
+#[tokio::test]
 async fn queued_bring_up_keeps_its_own_generation() {
     let temporary = tempfile::tempdir().unwrap();
     let manager = manager(temporary.path());

@@ -861,6 +861,12 @@ impl XUI {
                 old_tag = ib.tag;
                 bound_to = ib.bound_to;
             }
+            if !bound_to.is_empty() {
+                let runtime = self.runtime().await;
+                if !runtime_has_target(&runtime, &bound_to) {
+                    bail!("原绑定出口 {bound_to} 不可用，拒绝修改端口");
+                }
+            }
         }
 
         self.update_inbound_raw(id, "改入站", |payload, _| {
@@ -887,13 +893,10 @@ impl XUI {
         else {
             return Ok(());
         };
-        let runtime = self.runtime().await;
-        for tunnel in &runtime.tunnels {
-            if sanitize_tag(&tunnel.node.hostname) == bound_to {
-                return self.bind_runtime(&ib.tag, &tunnel.node.hostname).await;
-            }
+        if runtime_has_target(&runtime, &bound_to) {
+            return self.bind_runtime(&ib.tag, &bound_to).await;
         }
-        Ok(())
+        bail!("原绑定出口 {bound_to} 不可用，拒绝把改端口后的入站暴露为直连")
     }
 
     async fn add_client_runtime(&self, id: i64, email: &str) -> Result<()> {
@@ -1577,6 +1580,18 @@ fn egress_tag(identity: &str) -> String {
 
 fn pool_identity(id: &str) -> String {
     format!("{POOL_TAG_PREFIX}{id}")
+}
+
+fn runtime_has_target(runtime: &Runtime, target: &str) -> bool {
+    target.strip_prefix(POOL_TAG_PREFIX).is_some_and(|id| {
+        runtime
+            .pools
+            .iter()
+            .any(|pool| pool.id == id && pool.running)
+    }) || runtime
+        .tunnels
+        .iter()
+        .any(|tunnel| tunnel.status == "up" && sanitize_tag(&tunnel.node.hostname) == target)
 }
 
 fn sanitize_tag(name: &str) -> String {

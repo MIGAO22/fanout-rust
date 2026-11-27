@@ -293,7 +293,7 @@ async fn main() -> Result<()> {
     )
     .with_graceful_shutdown(shutdown)
     .await?;
-    manager.shutdown().await;
     state.pools.close().await;
+    manager.shutdown().await;
     Ok(())
 }

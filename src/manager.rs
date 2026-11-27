@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::{Duration, Instant},
@@ -184,6 +184,7 @@ pub struct Manager {
     factory: Arc<dyn TunnelFactory>,
     pub tunnels: Arc<Mutex<HashMap<usize, Arc<Tunnel>>>>,
     allocate: Arc<Mutex<()>>,
+    closing: AtomicBool,
     panel: std::sync::OnceLock<Arc<dyn Panel>>,
 }
 
@@ -204,6 +205,7 @@ impl Manager {
             factory,
             tunnels: Arc::new(Mutex::new(HashMap::new())),
             allocate: Arc::new(Mutex::new(())),
+            closing: AtomicBool::new(false),
             panel: std::sync::OnceLock::new(),
         })
     }
@@ -343,6 +345,9 @@ impl Manager {
     pub async fn start(&self, node: Node) -> Result<Arc<Tunnel>> {
         self.ensure_nodes().await.ok();
         let _allocation = self.allocate.lock().await;
+        if self.closing.load(Ordering::Acquire) {
+            bail!("服务正在关闭，不能新建出口");
+        }
         let (slot, port) = self.free_slot_port().await?;
         let cred = new_socks_cred();
         let runtime = self.factory.create(slot, port, cred.clone(), &self.dir);
@@ -366,9 +371,28 @@ impl Manager {
             .await
             .remove(&slot)
             .ok_or_else(|| anyhow!("出口不存在"))?;
-        t.bump_generation();
-        t.set_status("stopped", "").await;
-        let _ = t.runtime.stop().await;
+        self.stop_removed(t).await
+    }
+
+    pub async fn stop_current(&self, tunnel: &Arc<Tunnel>) -> Result<()> {
+        let _allocation = self.allocate.lock().await;
+        let t = {
+            let mut tunnels = self.tunnels.lock().await;
+            if !tunnels
+                .get(&tunnel.slot)
+                .is_some_and(|current| Arc::ptr_eq(current, tunnel))
+            {
+                return Ok(());
+            }
+            tunnels.remove(&tunnel.slot).expect("checked above")
+        };
+        self.stop_removed(t).await
+    }
+
+    async fn stop_removed(&self, tunnel: Arc<Tunnel>) -> Result<()> {
+        tunnel.bump_generation();
+        tunnel.set_status("stopped", "").await;
+        let _ = tunnel.runtime.stop().await;
         self.persist().await?;
         self.notify_panel().await;
         Ok(())
@@ -547,7 +571,7 @@ impl Manager {
     }
 
     async fn active(&self, t: &Arc<Tunnel>) -> bool {
-        if t.status().await == "stopped" {
+        if self.closing.load(Ordering::Acquire) || t.status().await == "stopped" {
             return false;
         }
         self.tunnels
@@ -985,12 +1009,16 @@ impl Manager {
     }
 
     pub async fn shutdown(&self) {
+        self.closing.store(true, Ordering::Release);
+        let _allocation = self.allocate.lock().await;
         let list = self.tunnels().await;
-        for t in list {
-            let _ = t.runtime.stop().await;
+        for tunnel in list {
+            tunnel.bump_generation();
+            tunnel.set_status("stopped", "").await;
+            let _ = tunnel.runtime.stop().await;
         }
-        if let Some(p) = self.panel.get() {
-            let _ = p.close().await;
+        if let Some(panel) = self.panel.get() {
+            let _ = panel.close().await;
         }
     }
 }

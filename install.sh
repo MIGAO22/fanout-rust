@@ -12,15 +12,24 @@ WEB_PORT="${WEB_PORT:-8899}"
 WORK_DIR="${WORK_DIR:-/var/lib/fanout}"
 BIN=/usr/local/bin/fanout-rust
 INSTALL_BACKUP=0
+INSTALL_UNIT_BACKUP=""
 rollback_install() {
   if [[ $INSTALL_BACKUP == 1 && -f "$BIN.prev" ]]; then
     cp -p "$BIN.prev" "$BIN.rollback.$$" && mv -f "$BIN.rollback.$$" "$BIN"
+  fi
+  if [[ -n $INSTALL_UNIT_BACKUP && -f $INSTALL_UNIT_BACKUP ]]; then
+    cp -p "$INSTALL_UNIT_BACKUP" "$UNIT.rollback.$$" && mv -f "$UNIT.rollback.$$" "$UNIT"
+    if declare -F svc_reload >/dev/null 2>&1; then
+      svc_reload >/dev/null 2>&1 || true
+    fi
+  fi
+  if [[ $INSTALL_BACKUP == 1 || -n $INSTALL_UNIT_BACKUP ]]; then
     if declare -F svc_restart >/dev/null 2>&1; then
       svc_restart >/dev/null 2>&1 || true
     fi
   fi
 }
-trap rollback_install ERR
+trap rollback_install EXIT
 
 if [[ $EUID -ne 0 ]]; then
   echo "需要 root 权限（要创建 netns 和改 iptables）" >&2
@@ -237,6 +246,10 @@ if [[ -f "$BIN" ]]; then
   cp -p "$BIN" "$BIN.prev"
   INSTALL_BACKUP=1
 fi
+if [[ -f "$UNIT" ]]; then
+  INSTALL_UNIT_BACKUP="$UNIT.install-prev"
+  cp -p "$UNIT" "$INSTALL_UNIT_BACKUP"
+fi
 install -m 755 "$TMP/fanout-rust" "$BIN.new"
 mv -f "$BIN.new" "$BIN"
 if [[ ! -f fanout-rust.service ]]; then
@@ -339,6 +352,10 @@ svc_is_active && echo "      服务运行中（${INIT_SYS}）" || {
   exit 1
 }
 INSTALL_BACKUP=0
+if [[ -n $INSTALL_UNIT_BACKUP ]]; then
+  rm -f "$INSTALL_UNIT_BACKUP"
+  INSTALL_UNIT_BACKUP=""
+fi
 
 # 口令与访问路径由 fanout-rust 首次启动时生成，等它写出来
 for _ in $(seq 1 10); do

@@ -2047,15 +2047,22 @@ impl Native {
     pub async fn update_runtime_and_apply(&self, runtime: RuntimeSnapshot) -> Result<()> {
         let mut state = self.inner.state.lock().await;
         state.runtime = runtime;
-        self.apply_locked(&mut state).await
+        self.apply_locked(&mut state, false).await
+    }
+
+    pub async fn start(&self) -> Result<()> {
+        self.apply_current().await
     }
 
     async fn apply_current(&self) -> Result<()> {
         let mut state = self.inner.state.lock().await;
-        self.apply_locked(&mut state).await
+        self.apply_locked(&mut state, false).await
     }
 
-    async fn apply_locked(&self, state: &mut NativeState) -> Result<()> {
+    async fn apply_locked(&self, state: &mut NativeState, immediate: bool) -> Result<()> {
+        let previous_store = load_native_store(&self.inner.dir)?;
+        let config_path = self.inner.dir.join("xray.json");
+        let previous_config = fs::read(&config_path).ok();
         let config = build_xray_config(
             &state.store.sorted(),
             &state.runtime.tunnels,
@@ -2082,7 +2089,43 @@ impl Native {
                 }
             })
         });
-        defer_restart(NATIVE_OWNER, self.inner.debounce, action).await
+        if !immediate {
+            return defer_restart(NATIVE_OWNER, self.inner.debounce, action).await;
+        }
+
+        cancel_restart(NATIVE_OWNER);
+        if let Err(error) = call_restart(action).await {
+            state.store = previous_store.clone();
+            if let Err(restore_error) = previous_store.save(&self.inner.dir) {
+                bail!("新版启动失败（{error}），恢复配置也失败: {restore_error}");
+            }
+            if let Some(blob) = previous_config {
+                util::atomic_write(&config_path, &blob, 0o600)?;
+                let old_empty = serde_json::from_slice::<Value>(&blob)
+                    .ok()
+                    .and_then(|value| value.get("inbounds").cloned())
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty);
+                let proc = Arc::clone(&self.inner.proc);
+                let rollback: RestartAction = Arc::new(move || {
+                    let proc = Arc::clone(&proc);
+                    let path = config_path.clone();
+                    Box::pin(async move {
+                        if old_empty {
+                            proc.stop().await;
+                            Ok(())
+                        } else {
+                            proc.restart(path).await
+                        }
+                    })
+                });
+                let _ = call_restart(rollback).await;
+            } else {
+                self.inner.proc.stop().await;
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Re-run the on-disk config with the current binary after an Xray update.
@@ -2240,7 +2283,7 @@ impl Panel for Native {
             .find(|ib| ib.tag() == tag)
             .ok_or_else(|| anyhow!("入站 {tag} 不存在"))?;
         ib.bound_to = bound_to;
-        self.apply_locked(&mut state).await
+        self.apply_locked(&mut state, true).await
     }
 
     async fn rebind(&self, old_host: &str, new_host: &str) -> Result<()> {
@@ -2260,7 +2303,7 @@ impl Panel for Native {
                 ib.remark = rename_exit_label(&ib.remark, &label);
             }
         }
-        self.apply_locked(&mut state).await
+        self.apply_locked(&mut state, true).await
     }
 
     async fn resync_outbound(&self, _host: &str) -> Result<()> {
@@ -2323,7 +2366,7 @@ impl Panel for Native {
         if created.is_empty() {
             bail!("没有可用的隧道");
         }
-        self.apply_locked(&mut state).await?;
+        self.apply_locked(&mut state, true).await?;
         Ok(created)
     }
 
@@ -2336,7 +2379,7 @@ impl Panel for Native {
         let before = state.store.inbounds.len();
         state.store.inbounds.retain(|ib| !drop.contains(&ib.id));
         let removed = before - state.store.inbounds.len();
-        self.apply_locked(&mut state).await?;
+        self.apply_locked(&mut state, true).await?;
         Ok(removed)
     }
 
@@ -2382,14 +2425,7 @@ impl Panel for Native {
             .checked_add(1)
             .ok_or_else(|| anyhow!("入站 ID 已溢出"))?;
         state.store.inbounds.push(ib.clone());
-        self.apply_locked(&mut state).await?;
-        if let Err(err) = flush_restart_now(NATIVE_OWNER).await {
-            state.store.inbounds.retain(|item| item.id != ib.id);
-            state.store.next_id = state.store.next_id.saturating_sub(1);
-            let _ = self.apply_locked(&mut state).await;
-            let _ = flush_restart_now(NATIVE_OWNER).await;
-            return Err(err);
-        }
+        self.apply_locked(&mut state, true).await?;
         let network = ib.net_or_tcp();
         let security = ib.security_or_none();
         Ok(CreatedInbound {
@@ -2454,7 +2490,7 @@ impl Panel for Native {
         if let Some(enable) = patch.enable {
             ib.enable = enable;
         }
-        self.apply_locked(&mut state).await
+        self.apply_locked(&mut state, true).await
     }
 
     async fn add_client(&self, id: &str, email: &str) -> Result<()> {
@@ -2486,7 +2522,7 @@ impl Panel for Native {
             enable: true,
             flow,
         });
-        self.apply_locked(&mut state).await
+        self.apply_locked(&mut state, true).await
     }
 
     async fn delete_client(&self, id: &str, email: &str) -> Result<()> {
@@ -2504,7 +2540,7 @@ impl Panel for Native {
         if ib.clients.len() == before {
             bail!("客户端 {email:?} 不存在");
         }
-        self.apply_locked(&mut state).await
+        self.apply_locked(&mut state, true).await
     }
 
     async fn reset_client(&self, id: &str, email: &str) -> Result<ClientInfo> {
@@ -2530,7 +2566,7 @@ impl Panel for Native {
             },
             enable: client.enable,
         };
-        self.apply_locked(&mut state).await?;
+        self.apply_locked(&mut state, true).await?;
         Ok(info)
     }
 

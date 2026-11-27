@@ -344,7 +344,7 @@ migrate_port_to_settings() {
 }
 
 do_update() {
-  local arch goarch tmp port bp had_bin=0 had_unit=0
+  local arch goarch tmp port bp had_bin=0 had_unit=0 expected_version running_version old_pid new_pid
   arch=$(uname -m)
   case "$arch" in
     x86_64) goarch=amd64 ;;
@@ -365,6 +365,11 @@ do_update() {
   if ! tar xzf "$tmp/f.tar.gz" -C "$tmp" || ! "$tmp/fanout-rust" -version >/dev/null 2>&1; then
     echo -e "  ${R}新版解包或自检失败，已放弃更新${N}"; rm -rf "$tmp"; return
   fi
+  expected_version=$("$tmp/fanout-rust" -version 2>/dev/null || true)
+  old_pid=""
+  if [[ $INIT_SYS == systemd ]]; then
+    old_pid=$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || true)
+  fi
 
   if [[ -f "$BIN" ]]; then
     cp -p "$BIN" "$BIN.prev" || { echo -e "  ${R}备份旧版失败${N}"; rm -rf "$tmp"; return; }
@@ -375,7 +380,9 @@ do_update() {
     had_unit=1
   fi
 
-  svc_stop
+  if ! svc_stop; then
+    echo -e "  ${R}停止旧服务失败，已放弃更新${N}"; rm -rf "$tmp"; return
+  fi
   if ! install -m 755 "$tmp/fanout-rust" "$BIN.new.$$" || ! mv -f "$BIN.new.$$" "$BIN"; then
     echo -e "  ${R}替换二进制失败${N}"
     [[ $had_bin == 1 ]] && cp -p "$BIN.prev" "$BIN.rollback.$$" && mv -f "$BIN.rollback.$$" "$BIN"
@@ -390,12 +397,23 @@ do_update() {
     sed -i "s#^command_args=.*#command_args=\"-dir ${WORK_DIR}\"#" "$UNIT"
   fi
   migrate_port_to_settings
-  svc_start
-  port=$(web_port)
-  bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
-  echo "  等待 Web 服务就绪..."
-  if ! web_ready "$port" "$bp"; then
-    echo -e "  ${R}新版未就绪，正在回滚${N}"
+  local ready=0
+  if svc_start; then
+    port=$(web_port)
+    bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
+    echo "  等待 Web 服务就绪..."
+    if web_ready "$port" "$bp"; then
+      ready=1
+    fi
+  fi
+  running_version=$("$BIN" -version 2>/dev/null || true)
+  new_pid=""
+  if [[ $INIT_SYS == systemd ]]; then
+    new_pid=$(systemctl show -p MainPID --value "$SERVICE" 2>/dev/null || true)
+  fi
+  if [[ $ready != 1 || "$running_version" != "$expected_version" ]] \
+     || { [[ $INIT_SYS == systemd ]] && [[ "$new_pid" == "$old_pid" ]]; }; then
+    echo -e "  ${R}新版未就绪或版本/PID 未变化，正在回滚${N}"
     [[ $had_bin == 1 ]] && cp -p "$BIN.prev" "$BIN.rollback.$$" && mv -f "$BIN.rollback.$$" "$BIN"
     if [[ $had_unit == 1 ]]; then
       cp -p "$tmp/unit.prev" "$UNIT"

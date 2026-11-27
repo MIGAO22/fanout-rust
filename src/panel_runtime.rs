@@ -310,9 +310,11 @@ impl PanelManager {
                 .await
                 .map(|panel| Backend::Xui(Arc::new(panel)))
                 .context("指定了 3x-ui 模式但探测失败"),
-            PANEL_MODE_NATIVE => Native::open(&self.inner.work_dir)
-                .map(|panel| Backend::Native(Arc::new(panel)))
-                .context("打开自建 Xray 失败"),
+            PANEL_MODE_NATIVE => {
+                let panel = Native::open(&self.inner.work_dir).context("打开自建 Xray 失败")?;
+                panel.start().await?;
+                Ok(Backend::Native(Arc::new(panel)))
+            }
             PANEL_MODE_XCL => XCL::detect(self.inner.xcl_runtime.clone())
                 .map(|panel| Backend::Xcl(Arc::new(panel)))
                 .context("指定了 xray-cf-lite 模式但探测失败"),
@@ -332,6 +334,7 @@ impl PanelManager {
                         reasons.join("；")
                     )
                 })?;
+                native.start().await?;
                 Ok(Backend::Native(Arc::new(native)))
             }
             _ => bail!("未知后端模式 {requested:?}"),

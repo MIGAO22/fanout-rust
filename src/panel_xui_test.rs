@@ -176,6 +176,24 @@ fn routing_binds_are_batched_grouped_and_idempotent() {
 }
 
 #[test]
+fn runtime_target_lookup_covers_live_pools_and_tunnels() {
+    let runtime = Runtime {
+        tunnels: vec![
+            tunnel("node/a", "up", 30_001),
+            tunnel("down", "failed", 30_002),
+        ],
+        pools: vec![PoolView {
+            running: true,
+            ..pool("p1", 40_001, 1)
+        }],
+    };
+    assert!(runtime_has_target(&runtime, "pool-p1"));
+    assert!(runtime_has_target(&runtime, "node-a"));
+    assert!(!runtime_has_target(&runtime, "pool-missing"));
+    assert!(!runtime_has_target(&runtime, "down"));
+}
+
+#[test]
 fn outbound_sync_replaces_only_fanout_entries_and_forces_direct_ipv4() {
     let mut setting = json!({
         "outbounds": [

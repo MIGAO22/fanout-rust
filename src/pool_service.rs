@@ -977,8 +977,18 @@ impl PoolService {
             self.mark_fill_bad(&node.hostname).await;
             return Err(node.hostname);
         }
-        if let Err(err) = self.swap_member(&pool.id, old_host, &node.hostname).await {
+        let swapped = {
+            let _operation = self.inner.operations.lock().await;
+            if self.pool(&pool.id).is_none() {
+                Err(anyhow!("出口组已被删除"))
+            } else {
+                self.swap_member_locked(&pool.id, old_host, &node.hostname)
+                    .await
+            }
+        };
+        if let Err(err) = swapped {
             warn!("出口组 {} 补位成功但写回成员失败: {err}", pool.name);
+            let _ = self.inner.manager.stop_current(&tunnel).await;
             self.mark_fill_bad(&node.hostname).await;
             return Err(node.hostname);
         }
@@ -996,6 +1006,11 @@ impl PoolService {
     }
 
     async fn swap_member(&self, id: &str, old_host: &str, new_host: &str) -> Result<()> {
+        let _operation = self.inner.operations.lock().await;
+        self.swap_member_locked(id, old_host, new_host).await
+    }
+
+    async fn swap_member_locked(&self, id: &str, old_host: &str, new_host: &str) -> Result<()> {
         let mut state = lock_unpoisoned(&self.inner.state);
         let mut store = state.store.clone();
         if store.swap_member(id, old_host, new_host)? {
@@ -1010,18 +1025,23 @@ impl PoolService {
         let Some(tunnel) = self
             .inner
             .manager
-            .states()
+            .tunnels()
             .await
             .into_iter()
-            .find(|state| state.node.hostname == host)
+            .find(|tunnel| tunnel.host().as_str() == host)
         else {
             return;
         };
         let used_by_pool = host_in_pool(&self.pools(), host);
         let inbound_bound = self.host_bound(host).await;
-        if let Some(slot) = retire_slot(host, Some(&tunnel), used_by_pool, inbound_bound) {
-            if let Err(err) = self.inner.manager.stop(slot).await {
-                warn!("出口组顶替后收尾 {host} 失败: {err}");
+        if let Some(slot) = retire_slot(
+            host,
+            Some(&tunnel.state().await),
+            used_by_pool,
+            inbound_bound,
+        ) {
+            if let Err(err) = self.inner.manager.stop_current(&tunnel).await {
+                warn!("出口组顶替后收尾 {host}（槽位 {slot}）失败: {err}");
             }
         }
     }

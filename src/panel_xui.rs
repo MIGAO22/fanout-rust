@@ -634,10 +634,11 @@ impl XUI {
                 enable: client.get("enable") != Some(&Value::Bool(false)),
             });
         }
+        let emails: Vec<String> = client_infos.iter().map(|info| info.email.clone()).collect();
         let link_batches = futures::stream::iter(
-            client_infos
-                .iter()
-                .map(|info: &ClientInfo| self.client_links(&info.email)),
+            emails
+                .into_iter()
+                .map(|email| async move { self.client_links(&email).await }),
         )
         .buffered(8)
         .collect::<Vec<_>>()
@@ -1083,8 +1084,11 @@ impl Panel for XUI {
     async fn inbound_links(&self, ids: &[String], host: &str) -> Result<Vec<String>> {
         let list = self.raw_inbounds().await?;
         let list = list.as_slice();
-        let batches = futures::stream::iter(ids.iter().map(|id: &String| async move {
-            let id = parse_id(id)?;
+        let ids = ids
+            .iter()
+            .map(|id| parse_id(id))
+            .collect::<Result<Vec<_>>>()?;
+        let batches = futures::stream::iter(ids.into_iter().map(|id| async move {
             let raw = find_raw_inbound(list, id)?;
             let port = value_to_u16(raw.get("port"));
             let mut links = Vec::new();

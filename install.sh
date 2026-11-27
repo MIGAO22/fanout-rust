@@ -46,6 +46,11 @@ else
   echo "不认识的 init 系统（需要 systemd 或 OpenRC）" >&2
   exit 1
 fi
+if [[ "$INIT_SYS" == systemd ]]; then
+  UNIT=/etc/systemd/system/fanout-rust.service
+else
+  UNIT=/etc/init.d/fanout-rust
+fi
 
 # seed_settings 把端口落进 settings.json —— 程序、f 菜单、Web 界面都以它为准。
 #
@@ -68,12 +73,12 @@ svc_install() {
     # 两处都写会互相拽回旧值——界面改完重启失效，或 f 改完被配置覆盖。
     # 老版本模板里可能还带 -web，一并去掉。
     sed "s#-web [0-9]* ##; s#-dir /var/lib/fanout#-dir ${WORK_DIR}#" fanout-rust.service \
-      > /etc/systemd/system/fanout-rust.service
+      > "$UNIT"
     systemctl daemon-reload
   else
     # OpenRC 没有 systemd 那套单元文件，直接写 init script。
     # supervise-daemon 负责守护与重启，等价于 Restart=on-failure。
-    cat > /etc/init.d/fanout-rust <<INITEOF
+    cat > "$UNIT" <<INITEOF
 #!/sbin/openrc-run
 name="fanout-rust"
 description="fanout-rust - VPN Gate 出口扇出网关"
@@ -89,7 +94,7 @@ supervisor=supervise-daemon
 start_pre() { ulimit -n 65536 2>/dev/null || true; }
 depend() { need net; after firewall; }
 INITEOF
-    chmod +x /etc/init.d/fanout-rust
+    chmod +x "$UNIT"
   fi
 }
 

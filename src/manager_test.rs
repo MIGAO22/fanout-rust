@@ -99,7 +99,7 @@ fn manager(dir: &Path) -> Arc<Manager> {
         dir.to_path_buf(),
         MAX_EXITS,
         Arc::new(RwLock::new(WebSettings::default())),
-        Arc::new(JobStore::new()),
+        JobStore::new(),
         Arc::new(MockFactory),
     )
 }

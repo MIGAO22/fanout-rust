@@ -116,6 +116,10 @@ impl Auth {
         token
     }
 
+    pub async fn issue_session(&self) -> String {
+        self.issue().await
+    }
+
     async fn valid(&self, token: &str) -> bool {
         let mut s = self.sessions.lock().await;
         if let Some(exp) = s.get(token) {

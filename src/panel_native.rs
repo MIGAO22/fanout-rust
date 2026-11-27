@@ -2418,6 +2418,15 @@ impl Panel for Native {
                 .find(|other| other.id != id && other.port == port)
                 .map(|other| other.remark.clone())
         });
+        let runtime_port_used = patch.port.is_some_and(|port| {
+            state
+                .runtime
+                .tunnels
+                .iter()
+                .any(|tunnel| tunnel.port == port)
+                || state.runtime.pools.iter().any(|pool| pool.port == port)
+                || external_used_ports().contains(&port)
+        });
         let ib = state
             .store
             .by_id_mut(id)
@@ -2429,6 +2438,9 @@ impl Panel for Native {
                 }
                 if let Some(remark) = conflicting_remark {
                     bail!("端口 {port} 已被入站 {remark:?} 占用");
+                }
+                if runtime_port_used {
+                    bail!("端口 {port} 已被运行中的服务占用");
                 }
                 ib.port = port;
             }

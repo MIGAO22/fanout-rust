@@ -589,6 +589,7 @@ pub async fn settings(
     body: Option<Json<SettingsReq>>,
 ) -> Response {
     let mut restarting = false;
+    let mut renewed_session = None;
     let mut base_path = state.basepath.clone();
     if let Some(Json(req)) = body {
         let old = state.manager.settings().await;
@@ -623,6 +624,7 @@ pub async fn settings(
             if let Err(err) = state.auth.set_password(&password).await {
                 return error(StatusCode::BAD_REQUEST, err.to_string());
             }
+            renewed_session = Some(state.auth.issue_session().await);
         }
         if let Some(path) = normalized_base {
             match crate::auth::save_basepath(&state.dir, &path) {
@@ -644,7 +646,7 @@ pub async fn settings(
         }
     }
     let s = state.manager.settings().await;
-    Json(json!({
+    let mut response = Json(json!({
         "base_path": base_path,
         "port": s.port,
         "listen_addr": s.listen_addr,
@@ -654,7 +656,16 @@ pub async fn settings(
         "restarting": restarting,
         "version": env!("CARGO_PKG_VERSION")
     }))
-    .into_response()
+    .into_response();
+    if let Some(token) = renewed_session {
+        response.headers_mut().insert(
+            header::SET_COOKIE,
+            format!("fanout_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200")
+                .parse()
+                .unwrap(),
+        );
+    }
+    response
 }
 
 fn req_host(headers: &HeaderMap) -> String {

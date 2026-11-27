@@ -492,16 +492,14 @@ impl PoolService {
             .filter(|state| node_supports_aead(&state.node.config))
             .map(|state| state.node.hostname.clone())
             .collect();
+        let notes = lock_unpoisoned(&self.inner.state).fill.notes();
         let mut views = Vec::new();
         for pool in self.pools() {
             let members = self.resolve_members(&pool.id).await;
             let running = lock_unpoisoned(&self.inner.state)
                 .runs
                 .contains_key(&pool.id);
-            let note = lock_unpoisoned(&self.inner.state)
-                .fill
-                .notes()
-                .remove(&pool.id);
+            let note = notes.get(&pool.id);
             views.push(pool_view(
                 &pool,
                 &members,

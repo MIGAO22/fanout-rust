@@ -234,10 +234,13 @@ fn archive_extraction_selects_the_binary_member() -> Result<()> {
     let tar_path = temporary.path().join("fanout.tar.gz");
     write_tar_gz(
         &tar_path,
-        &[("install.sh", "echo hi"), ("./fanout", "BINARY-CONTENT")],
+        &[
+            ("install.sh", "echo hi"),
+            (UPDATE_BINARY_MEMBER, "BINARY-CONTENT"),
+        ],
     )?;
     let fanout = temporary.path().join("fanout");
-    extract_binary(&tar_path, "fanout", &fanout)?;
+    extract_binary(&tar_path, UPDATE_BINARY_MEMBER, &fanout)?;
     assert_eq!(fs::read(&fanout)?, b"BINARY-CONTENT");
     assert!(extract_binary(&tar_path, "missing", &fanout).is_err());
     Ok(())

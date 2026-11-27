@@ -75,6 +75,7 @@ const REPO_REFRESH_TIMEOUT: Duration = Duration::from_secs(45);
 const REPO_QUERY_TIMEOUT: Duration = Duration::from_secs(60);
 const REFRESH_RETRY_WAIT: Duration = Duration::from_secs(6);
 const PACKAGE_COMMAND_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const UPDATE_BINARY_MEMBER: &str = "fanout-rust";
 
 static XRAY_APPLY_LOCK: Mutex<()> = Mutex::const_new(());
 static OPENVPN_APPLY_LOCK: Mutex<()> = Mutex::const_new(());
@@ -352,7 +353,7 @@ where
         verify_checksum(&tar_path, &asset_name, &sums_url).await?;
     }
     let new_binary = temporary.path().join("fanout");
-    extract_binary(&tar_path, "fanout", &new_binary).context("解包失败")?;
+    extract_binary(&tar_path, UPDATE_BINARY_MEMBER, &new_binary).context("解包失败")?;
 
     let executable = env::current_exe().context("定位当前程序失败")?;
     let executable = fs::canonicalize(&executable).unwrap_or(executable);

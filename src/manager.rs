@@ -130,6 +130,7 @@ impl Tunnel {
         i.status = "up".into();
         i.exit_ip = ip;
         i.err.clear();
+        i.avoid.clear();
         i.since = Utc::now();
     }
 
@@ -464,6 +465,23 @@ impl Manager {
         });
     }
 
+    async fn avoid_failed(&self, t: &Arc<Tunnel>, host: &str) {
+        let max_avoid = self
+            .settings()
+            .await
+            .conn
+            .max_tries
+            .saturating_mul(2)
+            .clamp(4, 64);
+        let mut inner = t.inner.lock().await;
+        if !inner.avoid.iter().any(|candidate| candidate == host) {
+            inner.avoid.push(host.to_string());
+        }
+        while inner.avoid.len() > max_avoid {
+            inner.avoid.remove(0);
+        }
+    }
+
     async fn candidates_for(&self, t: &Arc<Tunnel>, prefer_current: bool) -> Vec<Node> {
         let s = self.settings().await;
         let nodes = self.nodes.nodes(s.residential_only()).await;
@@ -577,6 +595,7 @@ impl Manager {
                 Err(e) => {
                     last = e.to_string();
                     let _ = t.runtime.stop().await;
+                    self.avoid_failed(t, &node.hostname).await;
                 }
             }
         }

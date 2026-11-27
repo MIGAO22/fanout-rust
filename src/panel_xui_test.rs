@@ -133,6 +133,49 @@ fn binding_parser_ignores_legacy_numeric_tags_and_accepts_string_or_array() {
 }
 
 #[test]
+fn routing_binds_are_batched_grouped_and_idempotent() {
+    let mut setting = json!({
+        "routing": {
+            "domainStrategy": "AsIs",
+            "rules": [
+                {"type": "field", "inboundTag": ["in-1-tcp", "in-2-ws", "stale"], "outboundTag": "fanout-old"},
+                {"type": "field", "inboundTag": ["in-3-grpc"], "outboundTag": "fanout-other"},
+                {"type": "field", "inboundTag": ["manual"], "outboundTag": "direct", "port": 443},
+            ]
+        }
+    });
+    let known = HashSet::from([
+        "in-1-tcp".to_string(),
+        "in-2-ws".to_string(),
+        "in-3-grpc".to_string(),
+        "manual".to_string(),
+    ]);
+    let binds = [
+        ("in-1-tcp", "fanout-new"),
+        ("in-2-ws", ""),
+        ("in-3-grpc", "fanout-new"),
+    ];
+    apply_routing_binds(&mut setting, &binds, &known);
+    assert_eq!(setting["routing"]["domainStrategy"], "AsIs");
+    assert_eq!(
+        setting["routing"]["rules"],
+        json!([
+            {"type": "field", "inboundTag": ["manual"], "outboundTag": "direct", "port": 443},
+            {"type": "field", "inboundTag": ["in-1-tcp", "in-3-grpc"], "outboundTag": "fanout-new"},
+        ])
+    );
+    let bound = bound_from_setting(&setting);
+    assert_eq!(bound.get("in-1-tcp").map(String::as_str), Some("new"));
+    assert_eq!(bound.get("in-3-grpc").map(String::as_str), Some("new"));
+    assert!(!bound.contains_key("in-2-ws"));
+    assert!(!bound.contains_key("stale"));
+
+    let once = setting.clone();
+    apply_routing_binds(&mut setting, &binds, &known);
+    assert_eq!(setting, once);
+}
+
+#[test]
 fn outbound_sync_replaces_only_fanout_entries_and_forces_direct_ipv4() {
     let mut setting = json!({
         "outbounds": [

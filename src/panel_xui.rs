@@ -12,6 +12,7 @@ use crate::{
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use futures::StreamExt;
 use rand::Rng;
 use regex::Regex;
 use reqwest::{Client, Method, StatusCode};
@@ -357,7 +358,10 @@ impl XUI {
         parse_xray_config(&obj).context("解析 Xray 配置失败")
     }
 
-    async fn save_xray(&self, setting: Value, test_url: String) -> Result<()> {
+    async fn save_xray(&self, previous: &Value, setting: Value, test_url: String) -> Result<()> {
+        if previous == &setting {
+            return Ok(());
+        }
         let mut form = vec![("xraySetting".to_string(), setting.to_string())];
         if !test_url.is_empty() {
             form.push(("outboundTestUrl".to_string(), test_url));
@@ -375,45 +379,31 @@ impl XUI {
         Ok(())
     }
 
-    async fn inbounds_snapshot(&self) -> Result<Vec<Inbound>> {
+    async fn raw_inbounds(&self) -> Result<Vec<Value>> {
         let obj = self
             .call(Method::GET, "panel/api/inbounds/list", None, true)
             .await?;
-        let raw = obj.as_array().context("解析入站列表失败: obj 不是数组")?;
-        let bound = self.bound_inbounds().await?;
+        Ok(obj
+            .as_array()
+            .context("解析入站列表失败: obj 不是数组")?
+            .clone())
+    }
+
+    async fn inbounds_snapshot(&self) -> Result<Vec<Inbound>> {
+        let (list, xray) = tokio::join!(self.raw_inbounds(), self.load_xray());
+        let raw = list?;
+        let (setting, _) = xray?;
+        let bound = bound_from_setting(&setting);
         let live = self.runtime_live().await;
-        let mut out = Vec::with_capacity(raw.len());
-        for item in raw {
-            let stream = item.get("streamSettings").cloned().unwrap_or(Value::Null);
-            let port = value_to_u16(item.get("port"));
-            let api_tag = scalar_string(item.get("tag"));
-            let tag = resolved_inbound_tag(&api_tag, port, &stream);
-            let bound_to = bound.get(&tag).cloned().unwrap_or_default();
-            let bound_up = live.get(&bound_to).copied().unwrap_or(false);
-            out.push(Inbound {
-                id: value_to_i64(item.get("id")).to_string(),
-                port,
-                protocol: scalar_string(item.get("protocol")),
-                remark: scalar_string(item.get("remark")),
-                enable: item.get("enable").and_then(Value::as_bool) == Some(true),
-                tag,
-                bound_to,
-                bound_up,
-            });
+        Ok(inbounds_from_raw(&raw, &bound, &live))
+    }
+
+    async fn egress_tag_for_host(&self, hostname: &str) -> Result<String> {
+        if hostname.is_empty() {
+            return Ok(String::new());
         }
-        Ok(out)
-    }
-
-    async fn bound_inbounds(&self) -> Result<HashMap<String, String>> {
-        let (setting, _) = self.load_xray().await?;
-        Ok(bound_from_setting(&setting))
-    }
-
-    async fn bind_runtime(&self, inbound_tag: &str, hostname: &str) -> Result<()> {
         let runtime = self.runtime().await;
-        let tag = if hostname.is_empty() {
-            String::new()
-        } else if let Some(id) = hostname
+        if let Some(id) = hostname
             .strip_prefix(POOL_TAG_PREFIX)
             .filter(|id| !id.is_empty())
         {
@@ -422,90 +412,61 @@ impl XUI {
                 .iter()
                 .find(|pool| pool.id == id)
                 .ok_or_else(|| anyhow!("出口组 {hostname} 不存在或监听没起来"))?;
-            egress_tag(&pool_identity(&pool.id))
-        } else {
-            let tunnel = runtime
-                .tunnels
-                .iter()
-                .find(|tunnel| tunnel.node.hostname == hostname)
-                .ok_or_else(|| anyhow!("节点 {hostname} 没有运行中的隧道"))?;
-            if tunnel.status != "up" {
-                bail!("节点 {hostname} 的隧道还没连通（当前 {}）", tunnel.status);
-            }
-            egress_tag(&tunnel.node.hostname)
-        };
+            return Ok(egress_tag(&pool_identity(&pool.id)));
+        }
+        let tunnel = runtime
+            .tunnels
+            .iter()
+            .find(|tunnel| tunnel.node.hostname == hostname)
+            .ok_or_else(|| anyhow!("节点 {hostname} 没有运行中的隧道"))?;
+        if tunnel.status != "up" {
+            bail!("节点 {hostname} 的隧道还没连通（当前 {}）", tunnel.status);
+        }
+        Ok(egress_tag(&tunnel.node.hostname))
+    }
 
-        let current = self.inbounds_snapshot().await?;
-        let known_tags: HashSet<String> = current.into_iter().map(|ib| ib.tag).collect();
-        let (mut setting, test_url) = self.load_xray().await?;
+    async fn bind_runtime(&self, inbound_tag: &str, hostname: &str) -> Result<()> {
+        let tag = self.egress_tag_for_host(hostname).await?;
+        self.bind_runtime_many(&[(inbound_tag, tag.as_str())]).await
+    }
+
+    async fn bind_runtime_many(&self, binds: &[(&str, &str)]) -> Result<()> {
+        if binds.is_empty() {
+            return Ok(());
+        }
+        let runtime = self.runtime().await;
+        let (list, xray) = tokio::join!(self.raw_inbounds(), self.load_xray());
+        let raw = list?;
+        let (mut setting, test_url) = xray?;
+        let known_tags: HashSet<String> = raw
+            .iter()
+            .map(|item| {
+                let stream = item.get("streamSettings").cloned().unwrap_or(Value::Null);
+                resolved_inbound_tag(
+                    &scalar_string(item.get("tag")),
+                    value_to_u16(item.get("port")),
+                    &stream,
+                )
+            })
+            .collect();
+        let previous = setting.clone();
         sync_outbounds_with_runtime(&mut setting, &runtime);
-
-        let mut routing = setting
-            .get("routing")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
-        let rules = routing
-            .get("rules")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let mut cleaned = Vec::with_capacity(rules.len() + 1);
-        for rule in rules {
-            let Some(mut object) = rule.as_object().cloned() else {
-                cleaned.push(rule);
-                continue;
-            };
-            let outbound_tag = scalar_string(object.get("outboundTag"));
-            if !outbound_tag.starts_with(XUI_TAG_PREFIX) {
-                cleaned.push(Value::Object(object));
-                continue;
-            }
-            let remain: Vec<Value> = to_string_slice(object.get("inboundTag"))
-                .into_iter()
-                .filter(|tag| tag != inbound_tag && known_tags.contains(tag))
-                .map(Value::String)
-                .collect();
-            if !remain.is_empty() {
-                object.insert("inboundTag".into(), Value::Array(remain));
-                cleaned.push(Value::Object(object));
-            }
-        }
-        if !tag.is_empty() {
-            cleaned.push(json!({
-                "type": "field",
-                "inboundTag": [inbound_tag],
-                "outboundTag": tag,
-            }));
-        }
-        routing.insert("rules".into(), Value::Array(cleaned));
-        setting
-            .as_object_mut()
-            .unwrap()
-            .insert("routing".into(), Value::Object(routing));
-        self.save_xray(setting, test_url).await
+        apply_routing_binds(&mut setting, binds, &known_tags);
+        self.save_xray(&previous, setting, test_url).await
     }
 
     async fn raw_inbound(&self, id: i64) -> Result<Map<String, Value>> {
-        let obj = self
-            .call(Method::GET, "panel/api/inbounds/list", None, true)
-            .await?;
-        let list = obj.as_array().context("解析入站列表失败: obj 不是数组")?;
-        for item in list {
-            if value_to_i64(item.get("id")) == id {
-                return item
-                    .as_object()
-                    .cloned()
-                    .ok_or_else(|| anyhow!("入站 {id} 格式错误"));
-            }
-        }
-        bail!("入站 {id} 不存在")
+        let list = self.raw_inbounds().await?;
+        find_raw_inbound(&list, id).cloned()
     }
 
     async fn used_ports(&self) -> Result<HashSet<u16>> {
-        let list = self.inbounds_snapshot().await?;
+        let list = self.raw_inbounds().await?;
         let runtime = self.runtime().await;
-        let mut used: HashSet<u16> = list.into_iter().map(|ib| ib.port).collect();
+        let mut used: HashSet<u16> = list
+            .iter()
+            .map(|item| value_to_u16(item.get("port")))
+            .collect();
         used.extend(runtime.pools.into_iter().map(|pool| pool.port));
         Ok(used)
     }
@@ -515,21 +476,28 @@ impl XUI {
         template_id: i64,
         hosts: &[String],
     ) -> Result<Vec<u16>> {
-        let raw = self.raw_inbound(template_id).await?;
-        let runtime = self.runtime().await;
+        let (list, runtime) = tokio::join!(self.raw_inbounds(), self.runtime());
+        let list = list?;
+        let raw = find_raw_inbound(&list, template_id).cloned()?;
         let by_host: HashMap<&str, &TunnelState> = runtime
             .tunnels
             .iter()
             .map(|tunnel| (tunnel.node.hostname.as_str(), tunnel))
             .collect();
-        let mut used = self.used_ports().await?;
+        let mut used: HashSet<u16> = list
+            .iter()
+            .map(|item| value_to_u16(item.get("port")))
+            .collect();
+        used.extend(runtime.pools.iter().map(|pool| pool.port));
         let emails = client_emails(&raw)?;
-        let mut taken_remarks = HashSet::new();
-        if let Ok(list) = self.inbounds_snapshot().await {
-            taken_remarks.extend(list.into_iter().map(|ib| ib.remark));
-        }
+        let mut taken_remarks: HashSet<String> = list
+            .iter()
+            .map(|item| scalar_string(item.get("remark")))
+            .collect();
 
         let mut created = Vec::new();
+        let mut new_ids = Vec::new();
+        let mut pending = Vec::new();
         for host in hosts {
             let Some(tunnel) = by_host.get(host.as_str()).copied() else {
                 continue;
@@ -546,24 +514,21 @@ impl XUI {
                 taken_remarks.insert(unique);
             }
             let new_id = self
-                .add_inbound(&Value::Object(clone.clone()))
+                .add_inbound(&Value::Object(clone))
                 .await
                 .with_context(|| format!("复制到端口 {port} 失败"))?;
-            self.attach_clients(&emails, new_id).await?;
             created.push(port);
-
-            let new_raw = self
-                .raw_inbound(new_id)
-                .await
-                .with_context(|| format!("读取端口 {port} 的入站标签失败"))?;
-            let mut new_tag = scalar_string(new_raw.get("tag"));
-            if new_tag.is_empty() {
-                new_tag = inbound_tag_of(port, &raw);
-            }
-            self.bind_runtime(&new_tag, host)
-                .await
-                .with_context(|| format!("端口 {port} 绑定失败"))?;
+            new_ids.push(new_id);
+            pending.push((inbound_tag_of(port, &raw), egress_tag(host)));
         }
+        self.attach_clients(&emails, &new_ids).await?;
+        let binds: Vec<(&str, &str)> = pending
+            .iter()
+            .map(|(inbound, outbound)| (inbound.as_str(), outbound.as_str()))
+            .collect();
+        self.bind_runtime_many(&binds)
+            .await
+            .context("批量绑定新入站失败")?;
         Ok(created)
     }
 
@@ -579,13 +544,16 @@ impl XUI {
         Ok(id)
     }
 
-    async fn attach_clients(&self, emails: &[String], inbound_id: i64) -> Result<()> {
+    async fn attach_clients(&self, emails: &[String], inbound_ids: &[i64]) -> Result<()> {
+        if inbound_ids.is_empty() {
+            return Ok(());
+        }
         for email in emails {
-            match self.attach_once(email, inbound_id).await {
+            match self.attach_once(email, inbound_ids).await {
                 Ok(()) => {}
                 Err(err) if err.to_string().contains("Duplicate email") => {
                     self.normalize_client(email).await?;
-                    self.attach_once(email, inbound_id).await?;
+                    self.attach_once(email, inbound_ids).await?;
                 }
                 Err(err) => return Err(err),
             }
@@ -593,10 +561,10 @@ impl XUI {
         Ok(())
     }
 
-    async fn attach_once(&self, email: &str, inbound_id: i64) -> Result<()> {
+    async fn attach_once(&self, email: &str, inbound_ids: &[i64]) -> Result<()> {
         let path = format!("panel/api/clients/{}/attach", url_encode(email));
         let envelope = self
-            .json_call(&path, &json!({"inboundIds": [inbound_id]}))
+            .json_call(&path, &json!({"inboundIds": inbound_ids}))
             .await?;
         if envelope["success"].as_bool() != Some(true) {
             bail!(
@@ -617,10 +585,12 @@ impl XUI {
     }
 
     async fn inbound_detail_snapshot(&self, id: i64, public_host: &str) -> Result<InboundDetail> {
-        let raw = self.raw_inbound(id).await?;
+        let (raw, xray) = tokio::join!(self.raw_inbound(id), self.load_xray());
+        let raw = raw?;
+        let (setting, _) = xray?;
         let settings = as_object(raw.get("settings")).context("解析 settings 失败")?;
         let stream = as_object(raw.get("streamSettings")).ok();
-        let bound = self.bound_inbounds().await?;
+        let bound = bound_from_setting(&setting);
         let live = self.runtime_live().await;
         let stream_value = raw.get("streamSettings").cloned().unwrap_or(Value::Null);
         let port = value_to_u16(raw.get("port"));
@@ -653,24 +623,33 @@ impl XUI {
             .and_then(Value::as_array)
             .map(Vec::as_slice)
             .unwrap_or_default();
+        let mut client_infos = Vec::new();
         for client in clients {
             let Some(client) = client.as_object() else {
                 continue;
             };
-            let info = ClientInfo {
+            client_infos.push(ClientInfo {
                 email: scalar_string(client.get("email")),
                 id: scalar_string(client.get("id")),
                 enable: client.get("enable") != Some(&Value::Bool(false)),
-            };
-            if let Ok(links) = self.client_links(&info.email).await {
-                for link in links {
-                    if let Some((fixed, true)) = link_for_port(&link, port, public_host) {
-                        detail.links.push(fixed);
-                    }
+            });
+        }
+        let link_batches = futures::stream::iter(
+            client_infos
+                .iter()
+                .map(|info| self.client_links(&info.email)),
+        )
+        .buffered(8)
+        .collect::<Vec<_>>()
+        .await;
+        for links in link_batches.into_iter().flatten() {
+            for link in links {
+                if let Some((fixed, true)) = link_for_port(&link, port, public_host) {
+                    detail.links.push(fixed);
                 }
             }
-            detail.clients.push(info);
         }
+        detail.clients = client_infos;
         Ok(detail)
     }
 
@@ -693,9 +672,20 @@ impl XUI {
         }
         let runtime = self.runtime().await;
         let (mut setting, test_url) = self.load_xray().await?;
+        let previous = setting.clone();
         sync_outbounds_with_runtime(&mut setting, &runtime);
-        let remain = self.inbounds_snapshot().await?;
-        let alive: HashSet<String> = remain.into_iter().map(|ib| ib.tag).collect();
+        let remain = self.raw_inbounds().await?;
+        let alive: HashSet<String> = remain
+            .iter()
+            .map(|item| {
+                let stream = item.get("streamSettings").cloned().unwrap_or(Value::Null);
+                resolved_inbound_tag(
+                    &scalar_string(item.get("tag")),
+                    value_to_u16(item.get("port")),
+                    &stream,
+                )
+            })
+            .collect();
         let mut routing = setting
             .get("routing")
             .and_then(Value::as_object)
@@ -731,7 +721,7 @@ impl XUI {
             .as_object_mut()
             .unwrap()
             .insert("routing".into(), Value::Object(routing));
-        self.save_xray(setting, test_url).await?;
+        self.save_xray(&previous, setting, test_url).await?;
         Ok(ids.len())
     }
 
@@ -742,28 +732,74 @@ impl XUI {
             .iter()
             .find(|tunnel| tunnel.node.hostname == new_host)
             .ok_or_else(|| anyhow!("节点 {new_host} 没有运行中的隧道"))?;
+        if target.status != "up" {
+            bail!("节点 {new_host} 的隧道还没连通（当前 {}）", target.status);
+        }
         let new_label = exit_label(target);
-        let list = self.inbounds_snapshot().await?;
+        let new_tag = egress_tag(&target.node.hostname);
+        let (raw, xray) = tokio::join!(self.raw_inbounds(), self.load_xray());
+        let raw = raw?;
+        let (mut setting, test_url) = xray?;
+        let bound = bound_from_setting(&setting);
+        let live = self.runtime_live().await;
+        let list = inbounds_from_raw(&raw, &bound, &live);
         let old_tag = sanitize_tag(old_host);
+        let mut pending = Vec::new();
+        let mut renames = Vec::new();
         for ib in list {
             if ib.bound_to != old_tag {
                 continue;
             }
-            self.bind_runtime(&ib.tag, new_host).await?;
+            pending.push((ib.tag.clone(), new_tag.clone()));
             let renamed = rename_exit_label(&ib.remark, &new_label);
             if renamed != ib.remark {
-                self.rename_inbound(parse_id(&ib.id)?, &renamed).await?;
+                renames.push((parse_id(&ib.id)?, renamed));
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let binds: Vec<(&str, &str)> = pending
+            .iter()
+            .map(|(inbound, outbound)| (inbound.as_str(), outbound.as_str()))
+            .collect();
+        let known_tags: HashSet<String> = raw
+            .iter()
+            .map(|item| {
+                let stream = item.get("streamSettings").cloned().unwrap_or(Value::Null);
+                resolved_inbound_tag(
+                    &scalar_string(item.get("tag")),
+                    value_to_u16(item.get("port")),
+                    &stream,
+                )
+            })
+            .collect();
+        let previous = setting.clone();
+        sync_outbounds_with_runtime(&mut setting, &runtime);
+        apply_routing_binds(&mut setting, &binds, &known_tags);
+        self.save_xray(&previous, setting, test_url).await?;
+        self.rename_inbounds(&renames, &raw).await
+    }
+
+    async fn rename_inbounds(&self, renames: &[(i64, String)], list: &[Value]) -> Result<()> {
+        if renames.is_empty() {
+            return Ok(());
+        }
+        for (id, remark) in renames {
+            let raw = find_raw_inbound(list, *id)?;
+            let mut payload = inbound_payload(raw);
+            payload.insert("remark".into(), Value::String(remark.clone()));
+            let envelope = self
+                .json_call(
+                    &format!("panel/api/inbounds/update/{id}"),
+                    &Value::Object(payload),
+                )
+                .await?;
+            if envelope["success"].as_bool() != Some(true) {
+                bail!("改名失败: {}", envelope["msg"].as_str().unwrap_or(""));
             }
         }
         Ok(())
-    }
-
-    async fn rename_inbound(&self, id: i64, remark: &str) -> Result<()> {
-        self.update_inbound_raw(id, "改名", move |payload, _| {
-            payload.insert("remark".into(), Value::String(remark.to_string()));
-            Ok(())
-        })
-        .await
     }
 
     async fn update_inbound_raw<F>(&self, id: i64, what: &str, mutate: F) -> Result<()>
@@ -967,8 +1003,9 @@ impl XUI {
     async fn resync_runtime(&self) -> Result<()> {
         let runtime = self.runtime().await;
         let (mut setting, test_url) = self.load_xray().await?;
+        let previous = setting.clone();
         sync_outbounds_with_runtime(&mut setting, &runtime);
-        self.save_xray(setting, test_url).await
+        self.save_xray(&previous, setting, test_url).await
     }
 
     async fn create_inbound_runtime(&self, spec: &Value) -> Result<CreatedInbound> {
@@ -1044,10 +1081,29 @@ impl Panel for XUI {
     }
 
     async fn inbound_links(&self, ids: &[String], host: &str) -> Result<Vec<String>> {
+        let list = self.raw_inbounds().await?;
+        let batches = futures::stream::iter(ids.iter().map(|id| async move {
+            let id = parse_id(id)?;
+            let raw = find_raw_inbound(&list, id)?;
+            let port = value_to_u16(raw.get("port"));
+            let mut links = Vec::new();
+            for email in client_emails(raw)? {
+                if let Ok(items) = self.client_links(&email).await {
+                    for link in items {
+                        if let Some((fixed, true)) = link_for_port(&link, port, host) {
+                            links.push(fixed);
+                        }
+                    }
+                }
+            }
+            Ok::<Vec<String>, anyhow::Error>(links)
+        }))
+        .buffered(4)
+        .collect::<Vec<_>>()
+        .await;
         let mut out = Vec::new();
-        for id in ids {
-            let detail = self.inbound_detail_snapshot(parse_id(id)?, host).await?;
-            out.extend(detail.links);
+        for links in batches {
+            out.extend(links?);
         }
         Ok(out)
     }
@@ -1146,7 +1202,11 @@ fn panel_backoff(attempt: usize) -> Duration {
 
 fn local_client() -> Result<Client> {
     Client::builder()
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(3))
+        .pool_max_idle_per_host(16)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_nodelay(true)
         .danger_accept_invalid_certs(true)
         .build()
         .context("创建 3x-ui HTTP 客户端失败")
@@ -1450,6 +1510,40 @@ fn resolved_inbound_tag(api_tag: &str, port: u16, stream_settings: &Value) -> St
     }
 }
 
+fn find_raw_inbound<'a>(list: &'a [Value], id: i64) -> Result<&'a Map<String, Value>> {
+    list.iter()
+        .find(|item| value_to_i64(item.get("id")) == id)
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("入站 {id} 不存在"))
+}
+
+fn inbounds_from_raw(
+    raw: &[Value],
+    bound: &HashMap<String, String>,
+    live: &HashMap<String, bool>,
+) -> Vec<Inbound> {
+    raw.iter()
+        .map(|item| {
+            let stream = item.get("streamSettings").cloned().unwrap_or(Value::Null);
+            let port = value_to_u16(item.get("port"));
+            let api_tag = scalar_string(item.get("tag"));
+            let tag = resolved_inbound_tag(&api_tag, port, &stream);
+            let bound_to = bound.get(&tag).cloned().unwrap_or_default();
+            let bound_up = live.get(&bound_to).copied().unwrap_or(false);
+            Inbound {
+                id: value_to_i64(item.get("id")).to_string(),
+                port,
+                protocol: scalar_string(item.get("protocol")),
+                remark: scalar_string(item.get("remark")),
+                enable: item.get("enable").and_then(Value::as_bool) == Some(true),
+                tag,
+                bound_to,
+                bound_up,
+            }
+        })
+        .collect()
+}
+
 fn inbound_tag_of(port: u16, template: &Map<String, Value>) -> String {
     inbound_tag(port, template.get("streamSettings").unwrap_or(&Value::Null))
 }
@@ -1518,6 +1612,81 @@ fn bound_from_setting(setting: &Value) -> HashMap<String, String> {
         }
     }
     bound
+}
+
+fn apply_routing_binds(setting: &mut Value, binds: &[(&str, &str)], known_tags: &HashSet<String>) {
+    let mut targets: HashSet<&str> = HashSet::new();
+    let mut selected: HashMap<&str, &str> = HashMap::new();
+    for (inbound, outbound) in binds {
+        if inbound.is_empty() {
+            continue;
+        }
+        targets.insert(inbound);
+        selected.insert(inbound, outbound);
+    }
+
+    let mut routing = setting
+        .get("routing")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let rules = routing
+        .get("rules")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut cleaned = Vec::with_capacity(rules.len() + binds.len());
+    for rule in rules {
+        let Some(mut object) = rule.as_object().cloned() else {
+            cleaned.push(rule);
+            continue;
+        };
+        if !scalar_string(object.get("outboundTag")).starts_with(XUI_TAG_PREFIX) {
+            cleaned.push(Value::Object(object));
+            continue;
+        }
+        let remain: Vec<Value> = to_string_slice(object.get("inboundTag"))
+            .into_iter()
+            .filter(|tag| !targets.contains(tag.as_str()) && known_tags.contains(tag))
+            .map(Value::String)
+            .collect();
+        if !remain.is_empty() {
+            object.insert("inboundTag".into(), Value::Array(remain));
+            cleaned.push(Value::Object(object));
+        }
+    }
+
+    let mut emitted = HashSet::new();
+    let mut order = Vec::new();
+    let mut grouped: HashMap<&str, Vec<String>> = HashMap::new();
+    for (inbound, _) in binds {
+        if inbound.is_empty() || !emitted.insert(*inbound) {
+            continue;
+        }
+        let outbound = selected.get(*inbound).copied().unwrap_or_default();
+        if outbound.is_empty() {
+            continue;
+        }
+        if !grouped.contains_key(outbound) {
+            order.push(outbound);
+        }
+        grouped
+            .entry(outbound)
+            .or_default()
+            .push((*inbound).to_string());
+    }
+    for outbound in order {
+        cleaned.push(json!({
+            "type": "field",
+            "inboundTag": grouped[outbound],
+            "outboundTag": outbound,
+        }));
+    }
+    routing.insert("rules".into(), Value::Array(cleaned));
+    setting
+        .as_object_mut()
+        .expect("Xray setting is an object")
+        .insert("routing".into(), Value::Object(routing));
 }
 
 fn socks_server(port: u16, user: &str, pass: &str) -> Value {

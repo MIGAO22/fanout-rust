@@ -171,10 +171,10 @@ async fn resolve_ipv4_targets(dialer: &NetnsDialer, addr: &str) -> Result<Vec<So
         }
         let _ = sender.send(Some(stored.clone()));
         guard.complete();
-        match result {
+        return match result {
             Ok(addresses) => Ok(addresses),
             Err(error) => Err(error.context(format!("解析目标 {addr} 失败"))),
-        }
+        };
     }
 }
 

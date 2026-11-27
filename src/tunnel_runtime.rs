@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, Notify, RwLock},
+    sync::{watch, Mutex, RwLock},
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
@@ -50,15 +50,47 @@ const DNS_CACHE_LIMIT: usize = 4096;
 type DnsCacheKey = (String, String, u16);
 type DnsCache = StdMutex<HashMap<DnsCacheKey, (Vec<SocketAddr>, Instant)>>;
 
+type DnsInflightResult = std::result::Result<Vec<SocketAddr>, String>;
+type DnsInflight = StdMutex<HashMap<DnsCacheKey, Arc<watch::Sender<Option<DnsInflightResult>>>>>;
+
 static DNS_CACHE: OnceLock<DnsCache> = OnceLock::new();
-static DNS_INFLIGHT: OnceLock<Mutex<HashMap<DnsCacheKey, Arc<Notify>>>> = OnceLock::new();
+static DNS_INFLIGHT: OnceLock<DnsInflight> = OnceLock::new();
 
 fn dns_cache() -> &'static DnsCache {
     DNS_CACHE.get_or_init(|| StdMutex::new(HashMap::new()))
 }
 
-fn dns_inflight() -> &'static Mutex<HashMap<DnsCacheKey, Arc<Notify>>> {
-    DNS_INFLIGHT.get_or_init(|| Mutex::new(HashMap::new()))
+fn dns_inflight() -> &'static DnsInflight {
+    DNS_INFLIGHT.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+struct DnsOwnerGuard {
+    key: DnsCacheKey,
+    sender: Arc<watch::Sender<Option<DnsInflightResult>>>,
+    completed: bool,
+}
+
+impl DnsOwnerGuard {
+    fn complete(mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for DnsOwnerGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let mut inflight = lock_unpoisoned(dns_inflight());
+        if inflight
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.sender))
+        {
+            inflight.remove(&self.key);
+        }
+        drop(inflight);
+        let _ = self.sender.send(Some(Err("DNS 解析任务已取消".into())));
+    }
 }
 
 fn cached_ipv4_targets(key: &DnsCacheKey) -> Option<Vec<SocketAddr>> {
@@ -83,41 +115,65 @@ async fn resolve_ipv4_targets(dialer: &NetnsDialer, addr: &str) -> Result<Vec<So
         if let Some(cached) = cached_ipv4_targets(&key) {
             return Ok(cached);
         }
-        let (notify, owner) = {
-            let mut inflight = dns_inflight().lock().await;
-            if let Some(notify) = inflight.get(&key) {
-                (Arc::clone(notify), false)
+        let (sender, owner) = {
+            let mut inflight = lock_unpoisoned(dns_inflight());
+            if let Some(sender) = inflight.get(&key) {
+                (Arc::clone(sender), false)
             } else {
-                let notify = Arc::new(Notify::new());
-                inflight.insert(key.clone(), Arc::clone(&notify));
-                (notify, true)
+                let (sender, _) = watch::channel(None);
+                let sender = Arc::new(sender);
+                inflight.insert(key.clone(), Arc::clone(&sender));
+                (sender, true)
             }
         };
         if !owner {
-            notify.notified().await;
-            continue;
-        }
-        let result = dialer.resolve_ipv4(host, port).await;
-        match result {
-            Ok(addresses) => {
-                {
-                    let mut cache = lock_unpoisoned(dns_cache());
-                    if cache.len() >= DNS_CACHE_LIMIT {
-                        cache.clear();
-                    }
-                    cache.insert(key.clone(), (addresses.clone(), Instant::now()));
+            let mut receiver = sender.subscribe();
+            loop {
+                if let Some(result) = receiver.borrow().clone() {
+                    return match result {
+                        Ok(addresses) => Ok(addresses),
+                        Err(message) => Err(anyhow!(message)),
+                    };
                 }
-                notify.notify_waiters();
-                notify.notify_one();
-                dns_inflight().lock().await.remove(&key);
-                return Ok(addresses);
+                if receiver.changed().await.is_err() {
+                    return Err(anyhow!("DNS 解析任务已取消"));
+                }
             }
-            Err(error) => {
-                notify.notify_waiters();
-                notify.notify_one();
-                dns_inflight().lock().await.remove(&key);
-                return Err(error.context(format!("解析目标 {addr} 失败")));
+        }
+        let guard = DnsOwnerGuard {
+            key: key.clone(),
+            sender: Arc::clone(&sender),
+            completed: false,
+        };
+        let result = dialer.resolve_ipv4(host, port).await;
+        let stored = match &result {
+            Ok(addresses) => Ok(addresses.clone()),
+            Err(error) => Err(format!("解析目标 {addr} 失败: {error:#}")),
+        };
+        if result.is_ok() {
+            let mut cache = lock_unpoisoned(dns_cache());
+            if cache.len() >= DNS_CACHE_LIMIT {
+                cache.clear();
             }
+            cache.insert(
+                key.clone(),
+                (stored.as_ref().unwrap().clone(), Instant::now()),
+            );
+        }
+        {
+            let mut inflight = lock_unpoisoned(dns_inflight());
+            if inflight
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &sender))
+            {
+                inflight.remove(&key);
+            }
+        }
+        let _ = sender.send(Some(stored.clone()));
+        guard.complete();
+        match result {
+            Ok(addresses) => Ok(addresses),
+            Err(error) => Err(error.context(format!("解析目标 {addr} 失败"))),
         }
     }
 }
@@ -575,6 +631,32 @@ mod tests {
         assert!(resolve_ipv4_targets(&dialer, "1.2.3.4:not-a-port")
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn dns_inflight_replays_results_and_wakes_waiters_on_cancel() {
+        let key = ("cancel-test-netns".into(), "example.invalid".into(), 443);
+        let (sender, _) = watch::channel(None);
+        let sender = Arc::new(sender);
+        lock_unpoisoned(dns_inflight()).insert(key.clone(), Arc::clone(&sender));
+        let mut first = sender.subscribe();
+        let mut second = sender.subscribe();
+        let guard = DnsOwnerGuard {
+            key: key.clone(),
+            sender: Arc::clone(&sender),
+            completed: false,
+        };
+        drop(guard);
+        first.changed().await.unwrap();
+        second.changed().await.unwrap();
+        assert!(matches!(first.borrow().clone(), Some(Err(_))));
+        assert!(matches!(second.borrow().clone(), Some(Err(_))));
+        assert!(!lock_unpoisoned(dns_inflight()).contains_key(&key));
+
+        let addresses = vec![SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 443))];
+        sender.send(Some(Ok(addresses.clone()))).unwrap();
+        assert_eq!(first.borrow().clone(), Some(Ok(addresses.clone())));
+        assert_eq!(second.borrow().clone(), Some(Ok(addresses)));
     }
 
     #[test]

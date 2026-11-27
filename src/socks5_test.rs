@@ -240,6 +240,16 @@ fn udp_relay_only_accepts_the_tcp_peers_address() {
         "127.0.0.2:53000".parse().unwrap(),
         peer
     ));
+    assert!(udp_source_allowed(
+        "[::ffff:127.0.0.1]:53000".parse().unwrap(),
+        peer
+    ));
+    assert_eq!(udp_requested_ip("0.0.0.0:0", peer), peer);
+    assert_eq!(
+        udp_requested_ip("127.0.0.2:53000", peer),
+        "127.0.0.2".parse::<IpAddr>().unwrap()
+    );
+    assert_eq!(udp_requested_ip("client.example:53000", peer), peer);
 }
 
 #[test]

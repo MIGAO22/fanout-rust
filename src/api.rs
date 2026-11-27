@@ -704,9 +704,21 @@ fn token_matches(expected: &str, supplied: &str) -> bool {
         == 0
 }
 
+async fn sync_sub_token(state: &AppState, token: &str) -> anyhow::Result<()> {
+    let mut settings = state.manager.settings().await;
+    if settings.sub_token.as_deref() == Some(token) {
+        return Ok(());
+    }
+    settings.sub_token = Some(token.to_string());
+    state.manager.update_settings(settings).await
+}
+
 pub async fn sub_info(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     match crate::sub::sub_token(&state.dir) {
         Ok(token) => {
+            if let Err(error) = sync_sub_token(&state, &token).await {
+                return internal(error);
+            }
             let path = crate::sub::sub_path_with_base(&state.basepath, &token);
             Json(json!({"token": token, "path": path, "url": format!("http://{}{}", req_host(&headers), path)})).into_response()
         }
@@ -717,6 +729,9 @@ pub async fn sub_info(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
 pub async fn sub_reset(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     match crate::sub::reset_sub_token(&state.dir) {
         Ok(token) => {
+            if let Err(error) = sync_sub_token(&state, &token).await {
+                return internal(error);
+            }
             let path = crate::sub::sub_path_with_base(&state.basepath, &token);
             Json(json!({"token": token, "path": path, "url": format!("http://{}{}", req_host(&headers), path)})).into_response()
         }
@@ -741,6 +756,9 @@ pub async fn subscription(
         Ok(token) => token,
         Err(err) => return internal(err),
     };
+    if let Err(error) = sync_sub_token(&state, &expected).await {
+        return internal(error);
+    }
     if !token_matches(&expected, &q.token) {
         return error(StatusCode::NOT_FOUND, "not found");
     }

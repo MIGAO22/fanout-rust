@@ -504,7 +504,7 @@ impl PoolService {
                 &pool,
                 &members,
                 running,
-                note.as_deref(),
+                note.map(String::as_str),
                 &aead_hosts,
             ));
         }

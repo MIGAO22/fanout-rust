@@ -169,6 +169,10 @@ impl WarpService {
         accounts.push(account.clone());
         if let Err(error) = self.save(&accounts).await {
             *accounts = previous;
+            drop(accounts);
+            if let Err(unregister_error) = unregister(&self.client, &account).await {
+                tracing::warn!("WARP 账号保存失败，云端清理也失败: {unregister_error}");
+            }
             return Err(error);
         }
         drop(accounts);
@@ -193,15 +197,21 @@ impl WarpService {
             accounts.iter().find(|a| a.slot == slot).cloned()
         };
         let account = self.register(slot, version).await?;
-        {
+        let saved = {
             let mut accounts = self.accounts.lock().await;
             let previous = accounts.clone();
             accounts.retain(|a| a.slot != slot);
             accounts.push(account.clone());
-            if let Err(error) = self.save(&accounts).await {
+            self.save(&accounts).await.map_err(|error| {
                 *accounts = previous;
-                return Err(error);
+                error
+            })
+        };
+        if let Err(error) = saved {
+            if let Err(unregister_error) = unregister(&self.client, &account).await {
+                tracing::warn!("WARP 账号保存失败，云端清理也失败: {unregister_error}");
             }
+            return Err(error);
         }
         if let Some(old) = old {
             if let Err(error) = unregister(&self.client, &old).await {
@@ -237,6 +247,22 @@ impl WarpService {
     }
 
     pub async fn prune(&self, active_slots: &std::collections::HashSet<usize>) -> Result<()> {
+        let candidates = {
+            let accounts = self.accounts.lock().await;
+            accounts
+                .iter()
+                .filter(|account| !active_slots.contains(&account.slot))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let mut slot_guards = Vec::with_capacity(candidates.len());
+        for account in &candidates {
+            let lock = self.slot_lock(account.slot).await;
+            slot_guards.push(lock.lock_owned().await);
+        }
         let _permit = self
             .lock
             .acquire()
@@ -246,7 +272,14 @@ impl WarpService {
             let accounts = self.accounts.lock().await;
             accounts
                 .iter()
-                .filter(|account| !active_slots.contains(&account.slot))
+                .filter(|account| {
+                    !active_slots.contains(&account.slot)
+                        && candidates.iter().any(|candidate| {
+                            candidate.slot == account.slot
+                                && candidate.id == account.id
+                                && candidate.token == account.token
+                        })
+                })
                 .cloned()
                 .collect::<Vec<_>>()
         };
@@ -259,18 +292,25 @@ impl WarpService {
                 .map(|account| unregister(&self.client, account)),
         )
         .await;
-        let mut failed = HashSet::new();
+        let mut removed_ids = HashSet::new();
         for (account, result) in removed.iter().zip(results) {
-            if let Err(error) = result {
-                failed.insert(account.slot);
-                tracing::warn!("清理 WARP 账号 {} 失败: {error}", account.slot);
+            match result {
+                Ok(()) => {
+                    removed_ids.insert((account.slot, account.id.clone(), account.token.clone()));
+                }
+                Err(error) => tracing::warn!("清理 WARP 账号 {} 失败: {error}", account.slot),
             }
         }
         let mut accounts = self.accounts.lock().await;
+        let previous = accounts.clone();
         accounts.retain(|account| {
-            active_slots.contains(&account.slot) || failed.contains(&account.slot)
+            !removed_ids.contains(&(account.slot, account.id.clone(), account.token.clone()))
         });
-        self.save(&accounts).await
+        if let Err(error) = self.save(&accounts).await {
+            *accounts = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub async fn drop_all(&self) -> Result<()> {
@@ -299,8 +339,13 @@ impl WarpService {
             })
             .collect();
         let mut accounts = self.accounts.lock().await;
+        let previous = accounts.clone();
         accounts.retain(|account| failed.contains(&account.slot));
-        self.save(&accounts).await
+        if let Err(error) = self.save(&accounts).await {
+            *accounts = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub async fn setup(&self, ns: &Netns, node: &Node) -> Result<WarpAccount> {

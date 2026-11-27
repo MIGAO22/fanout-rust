@@ -11,6 +11,16 @@ WEB_PORT_EXPLICIT="${WEB_PORT:+1}"
 WEB_PORT="${WEB_PORT:-8899}"
 WORK_DIR="${WORK_DIR:-/var/lib/fanout}"
 BIN=/usr/local/bin/fanout-rust
+INSTALL_BACKUP=0
+rollback_install() {
+  if [[ $INSTALL_BACKUP == 1 && -f "$BIN.prev" ]]; then
+    cp -p "$BIN.prev" "$BIN.rollback.$$" && mv -f "$BIN.rollback.$$" "$BIN"
+    if declare -F svc_restart >/dev/null 2>&1; then
+      svc_restart >/dev/null 2>&1 || true
+    fi
+  fi
+}
+trap rollback_install ERR
 
 if [[ $EUID -ne 0 ]]; then
   echo "需要 root 权限（要创建 netns 和改 iptables）" >&2
@@ -225,6 +235,7 @@ tar xzf "$TMP/f.tar.gz" -C "$TMP"
 "$TMP/fanout-rust" -version >/dev/null
 if [[ -f "$BIN" ]]; then
   cp -p "$BIN" "$BIN.prev"
+  INSTALL_BACKUP=1
 fi
 install -m 755 "$TMP/fanout-rust" "$BIN.new"
 mv -f "$BIN.new" "$BIN"
@@ -327,6 +338,7 @@ svc_is_active && echo "      服务运行中（${INIT_SYS}）" || {
   echo "      服务启动失败，看 $(svc_logs_hint)" >&2
   exit 1
 }
+INSTALL_BACKUP=0
 
 # 口令与访问路径由 fanout-rust 首次启动时生成，等它写出来
 for _ in $(seq 1 10); do

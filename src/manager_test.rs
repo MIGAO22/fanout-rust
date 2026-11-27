@@ -139,8 +139,11 @@ async fn stale_bring_up_cannot_mark_tunnel_up() {
     manager.tunnels.lock().await.insert(1, tunnel.clone());
     let task_manager = manager.clone();
     let task_tunnel = tunnel.clone();
+    let generation = tunnel.generation();
     let task = tokio::spawn(async move {
-        task_manager.bring_up(task_tunnel, false, false).await;
+        task_manager
+            .bring_up(task_tunnel, false, false, generation)
+            .await;
     });
     runtime.start_entered.notified().await;
     tunnel.bump_generation();
@@ -148,4 +151,39 @@ async fn stale_bring_up_cannot_mark_tunnel_up() {
     task.await.unwrap();
     assert_ne!(tunnel.status().await, "up");
     assert_eq!(runtime.starts.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn queued_bring_up_keeps_its_own_generation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let manager = manager(temporary.path());
+    manager.nodes.replace(vec![node("node-1")]).await;
+    let runtime = Arc::new(MockRuntime::new(new_socks_cred(), true));
+    let tunnel = Tunnel::new(1, 30_001, new_socks_cred(), node("node-1"), runtime.clone());
+    manager.tunnels.lock().await.insert(1, tunnel.clone());
+
+    let first_manager = manager.clone();
+    let first_tunnel = tunnel.clone();
+    let first_generation = tunnel.generation();
+    let first = tokio::spawn(async move {
+        first_manager
+            .bring_up(first_tunnel, false, false, first_generation)
+            .await;
+    });
+    runtime.start_entered.notified().await;
+    let second_generation = tunnel.bump_generation();
+    let second_manager = manager.clone();
+    let second_tunnel = tunnel.clone();
+    let second = tokio::spawn(async move {
+        second_manager
+            .bring_up(second_tunnel, false, false, second_generation)
+            .await;
+    });
+    runtime.start_release.notify_one();
+    runtime.start_entered.notified().await;
+    runtime.start_release.notify_one();
+    first.await.unwrap();
+    second.await.unwrap();
+    assert_eq!(runtime.starts.load(Ordering::SeqCst), 2);
+    assert_eq!(tunnel.status().await, "up");
 }

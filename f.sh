@@ -378,7 +378,7 @@ do_update() {
   svc_stop
   if ! install -m 755 "$tmp/fanout-rust" "$BIN.new.$$" || ! mv -f "$BIN.new.$$" "$BIN"; then
     echo -e "  ${R}替换二进制失败${N}"
-    [[ $had_bin == 1 ]] && cp -p "$BIN.prev" "$BIN"
+    [[ $had_bin == 1 ]] && cp -p "$BIN.prev" "$BIN.rollback.$$" && mv -f "$BIN.rollback.$$" "$BIN"
     rm -rf "$tmp"; svc_start; return
   fi
   if [[ $INIT_SYS == systemd && -f "$tmp/fanout-rust.service" ]]; then
@@ -396,7 +396,7 @@ do_update() {
   echo "  等待 Web 服务就绪..."
   if ! web_ready "$port" "$bp"; then
     echo -e "  ${R}新版未就绪，正在回滚${N}"
-    [[ $had_bin == 1 ]] && cp -p "$BIN.prev" "$BIN"
+    [[ $had_bin == 1 ]] && cp -p "$BIN.prev" "$BIN.rollback.$$" && mv -f "$BIN.rollback.$$" "$BIN"
     if [[ $had_unit == 1 ]]; then
       cp -p "$tmp/unit.prev" "$UNIT"
       svc_reload

@@ -175,7 +175,7 @@ where
 
     if cmd == CMD_UDP_ASSOCIATE {
         // Unlike CONNECT, UDP ASSOCIATE has no overall control-connection timeout.
-        return serve_udp_associate(client, dial).await;
+        return serve_udp_associate(client, dial, &addr).await;
     }
 
     let remote = match timeout_at(deadline, dial.dial(DialNetwork::Tcp, &addr)).await {
@@ -460,13 +460,36 @@ struct UdpSession {
 
 type SessionMap = Arc<Mutex<HashMap<String, Arc<UdpSession>>>>;
 
-fn udp_source_allowed(source: SocketAddr, peer_ip: IpAddr) -> bool {
-    source.ip() == peer_ip
+fn normalize_udp_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
+        ip => ip,
+    }
+}
+
+fn udp_source_allowed(source: SocketAddr, allowed_ip: IpAddr) -> bool {
+    normalize_udp_ip(source.ip()) == normalize_udp_ip(allowed_ip)
+}
+
+fn udp_requested_ip(requested: &str, peer_ip: IpAddr) -> IpAddr {
+    requested
+        .parse::<SocketAddr>()
+        .ok()
+        .map(|address| address.ip())
+        .filter(|ip| !ip.is_unspecified())
+        .unwrap_or(peer_ip)
 }
 
 /// Serves one UDP ASSOCIATE until its TCP control connection closes or the
 /// relay has no client datagrams for 60 seconds.
-pub async fn serve_udp_associate<D>(mut client: TcpStream, dial: &D) -> Result<(), SocksError>
+pub async fn serve_udp_associate<D>(
+    mut client: TcpStream,
+    dial: &D,
+    requested_endpoint: &str,
+) -> Result<(), SocksError>
 where
     D: SocksDialer + ?Sized,
 {
@@ -484,6 +507,7 @@ where
             return Err(err.into());
         }
     };
+    let allowed_ip = udp_requested_ip(requested_endpoint, peer_ip);
     let bind_ip = match local {
         SocketAddr::V4(local) => IpAddr::V4(*local.ip()),
         SocketAddr::V6(local) => local
@@ -543,7 +567,7 @@ where
             }
         };
         let (len, src) = received;
-        if !udp_source_allowed(src, peer_ip) {
+        if !udp_source_allowed(src, allowed_ip) {
             continue;
         }
         let Some(request) = parse_udp_req_header(&buf[..len]) else {

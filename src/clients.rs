@@ -383,12 +383,14 @@ where
 
     let executable = env::current_exe().context("定位当前程序失败")?;
     let executable = fs::canonicalize(&executable).unwrap_or(executable);
-    replace_binary_with(&executable, &new_binary, None)?;
-
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(800)).await;
-        restart_self();
-    });
+    replace_binary_with(
+        &executable,
+        &new_binary,
+        Some(&|| {
+            restart_self_checked()?;
+            Ok(())
+        }),
+    )?;
     Ok(())
 }
 
@@ -467,20 +469,29 @@ pub fn copy_file_mode(source: &Path, destination: &Path, mode: u32) -> Result<()
     Ok(())
 }
 
+pub fn restart_self_checked() -> Result<()> {
+    let mut command = if has_cmd("systemctl") && dir_exists(Path::new("/run/systemd/system")) {
+        let mut command = Command::new("systemctl");
+        command.args(["restart", "fanout-rust"]);
+        command
+    } else if has_cmd("rc-service") {
+        let mut command = Command::new("rc-service");
+        command.args(["fanout-rust", "restart"]);
+        command
+    } else {
+        bail!("未检测到 systemd/openrc，请手动重启服务");
+    };
+    let status = command.status().context("重启 fanout-rust 失败")?;
+    if !status.success() {
+        bail!("重启 fanout-rust 失败: {}", format_exit_status(&status));
+    }
+    Ok(())
+}
+
 pub fn restart_self() {
-    if has_cmd("systemctl") && dir_exists(Path::new("/run/systemd/system")) {
-        let _ = Command::new("systemctl")
-            .args(["restart", "fanout-rust"])
-            .spawn();
-        return;
+    if let Err(error) = restart_self_checked() {
+        tracing::warn!("fanout: {error}");
     }
-    if has_cmd("rc-service") {
-        let _ = Command::new("rc-service")
-            .args(["fanout-rust", "restart"])
-            .spawn();
-        return;
-    }
-    tracing::info!("fanout: 已替换二进制，但未检测到 systemd/openrc，请手动重启服务");
 }
 
 // ───────────────────────── versions and Xray updates ─────────────────────────

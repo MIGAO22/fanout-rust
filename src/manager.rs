@@ -351,8 +351,9 @@ impl Manager {
         self.persist().await?;
         let m = self.clone();
         let bg = t.clone();
+        let generation = t.generation();
         tokio::spawn(async move {
-            m.bring_up(bg, true, false).await;
+            m.bring_up(bg, true, false, generation).await;
         });
         Ok(t)
     }
@@ -418,7 +419,7 @@ impl Manager {
     }
 
     pub async fn reconnect(&self, t: Arc<Tunnel>, old_host: String) {
-        t.bump_generation();
+        let generation = t.bump_generation();
         t.set_status("starting", "正在换节点重连").await;
         {
             let mut i = t.inner.lock().await;
@@ -429,13 +430,15 @@ impl Manager {
         let m = self.clone();
         tokio::spawn(async move {
             let _ = t.runtime.stop().await;
-            m.bring_up(t.clone(), false, true).await;
-            if t.status().await == "up" && t.host().await != old_host {
-                if let Some(p) = m.panel.get() {
-                    let _ = p.rebind(&old_host, &t.host().await).await;
+            m.bring_up(t.clone(), false, true, generation).await;
+            if generation == t.generation() && m.active(&t).await {
+                if t.status().await == "up" && t.host().await != old_host {
+                    if let Some(p) = m.panel.get() {
+                        let _ = p.rebind(&old_host, &t.host().await).await;
+                    }
                 }
+                let _ = p_resync(&m, &t).await;
             }
-            let _ = p_resync(&m, &t).await;
         });
     }
 
@@ -446,7 +449,7 @@ impl Manager {
         warp: Arc<WarpService>,
         pools: Arc<PoolService>,
     ) {
-        t.bump_generation();
+        let generation = t.bump_generation();
         t.set_status("starting", "WARP 握手超时，正在清除并更换出口")
             .await;
         {
@@ -480,17 +483,19 @@ impl Manager {
             if let Err(err) = warp.remove(t.slot).await {
                 tracing::warn!("清理隧道 {} 的 WARP 注册失败: {err}", t.slot);
             }
-            m.bring_up(t.clone(), false, true).await;
-            if t.status().await == "up" && t.host().await != old_host {
-                let new_host = t.host().await;
-                if let Err(err) = pools.rename_host(&old_host, &new_host).await {
-                    tracing::warn!("更新出口组成员 {} -> {} 失败: {err}", old_host, new_host);
+            m.bring_up(t.clone(), false, true, generation).await;
+            if generation == t.generation() && m.active(&t).await {
+                if t.status().await == "up" && t.host().await != old_host {
+                    let new_host = t.host().await;
+                    if let Err(err) = pools.rename_host(&old_host, &new_host).await {
+                        tracing::warn!("更新出口组成员 {} -> {} 失败: {err}", old_host, new_host);
+                    }
+                    if let Some(p) = m.panel.get() {
+                        let _ = p.rebind(&old_host, &new_host).await;
+                    }
                 }
-                if let Some(p) = m.panel.get() {
-                    let _ = p.rebind(&old_host, &new_host).await;
-                }
+                let _ = p_resync(&m, &t).await;
             }
-            let _ = p_resync(&m, &t).await;
         });
     }
 
@@ -552,9 +557,11 @@ impl Manager {
             .is_some_and(|v| Arc::ptr_eq(v, t))
     }
 
-    async fn bring_up(&self, t: Arc<Tunnel>, notify: bool, persist: bool) {
+    async fn bring_up(&self, t: Arc<Tunnel>, notify: bool, persist: bool, generation: u64) {
         let _run = t.run_lock.lock().await;
-        let generation = t.generation();
+        if generation != t.generation() {
+            return;
+        }
         let s = self.settings().await;
         let mut backoff = Duration::from_secs(s.conn.backoff_min);
         let ceiling = Duration::from_secs(s.conn.backoff_max);
@@ -860,8 +867,9 @@ impl Manager {
             t.inner.lock().await.prev_host = p.prev_host;
             self.tunnels.lock().await.insert(p.slot, t.clone());
             let m = self.clone();
+            let generation = t.generation();
             tokio::spawn(async move {
-                m.bring_up(t, true, true).await;
+                m.bring_up(t, true, true, generation).await;
             });
         }
         Ok(())

@@ -3,7 +3,10 @@ use chrono::Utc;
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::{Mutex, RwLock, Semaphore};
@@ -38,6 +41,8 @@ pub struct Tunnel {
     pub cred: RwLock<SocksCred>,
     pub runtime: Arc<dyn TunnelRuntime>,
     pub inner: Mutex<TunnelInner>,
+    generation: AtomicU64,
+    run_lock: Mutex<()>,
 }
 
 impl Tunnel {
@@ -62,7 +67,17 @@ impl Tunnel {
                 prev_host: None,
                 avoid: Vec::new(),
             }),
+            generation: AtomicU64::new(0),
+            run_lock: Mutex::new(()),
         })
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    pub fn bump_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     pub async fn state(&self) -> TunnelState {
@@ -168,6 +183,7 @@ pub struct Manager {
     pub jobs: Arc<JobStore>,
     factory: Arc<dyn TunnelFactory>,
     pub tunnels: Arc<Mutex<HashMap<usize, Arc<Tunnel>>>>,
+    allocate: Arc<Mutex<()>>,
     panel: std::sync::OnceLock<Arc<dyn Panel>>,
 }
 
@@ -187,6 +203,7 @@ impl Manager {
             jobs,
             factory,
             tunnels: Arc::new(Mutex::new(HashMap::new())),
+            allocate: Arc::new(Mutex::new(())),
             panel: std::sync::OnceLock::new(),
         })
     }
@@ -320,6 +337,7 @@ impl Manager {
 
     pub async fn start(&self, node: Node) -> Result<Arc<Tunnel>> {
         self.ensure_nodes().await.ok();
+        let _allocation = self.allocate.lock().await;
         let (slot, port) = self.free_slot_port().await?;
         let cred = new_socks_cred();
         let runtime = self.factory.create(slot, port, cred.clone(), &self.dir);
@@ -335,12 +353,14 @@ impl Manager {
     }
 
     pub async fn stop(&self, slot: usize) -> Result<()> {
+        let _allocation = self.allocate.lock().await;
         let t = self
             .tunnels
             .lock()
             .await
             .remove(&slot)
             .ok_or_else(|| anyhow!("出口不存在"))?;
+        t.bump_generation();
         t.set_status("stopped", "").await;
         let _ = t.runtime.stop().await;
         self.persist().await?;
@@ -365,6 +385,7 @@ impl Manager {
         t.runtime.set_cred(cred.clone()).await?;
         *t.cred.write().await = cred.clone();
         self.persist().await?;
+        self.notify_panel().await;
         Ok(cred)
     }
 
@@ -382,6 +403,7 @@ impl Manager {
             .into_iter()
             .find(|n| n.hostname != old)
             .ok_or_else(|| anyhow!("没有可换的节点"))?;
+        t.bump_generation();
         t.set_node(next).await;
         let m = self.clone();
         tokio::spawn(async move {
@@ -391,6 +413,7 @@ impl Manager {
     }
 
     pub async fn reconnect(&self, t: Arc<Tunnel>, old_host: String) {
+        t.bump_generation();
         t.set_status("starting", "正在换节点重连").await;
         {
             let mut i = t.inner.lock().await;
@@ -418,6 +441,7 @@ impl Manager {
         warp: Arc<WarpService>,
         pools: Arc<PoolService>,
     ) {
+        t.bump_generation();
         t.set_status("starting", "WARP 握手超时，正在清除并更换出口")
             .await;
         {
@@ -524,12 +548,20 @@ impl Manager {
     }
 
     async fn bring_up(&self, t: Arc<Tunnel>, notify: bool, persist: bool) {
+        let _run = t.run_lock.lock().await;
+        let generation = t.generation();
         let s = self.settings().await;
         let mut backoff = Duration::from_secs(s.conn.backoff_min);
         let ceiling = Duration::from_secs(s.conn.backoff_max);
         let mut prefer = true;
         loop {
-            let (ok, err) = self.try_candidates(&t, notify, prefer).await;
+            if generation != t.generation() || !self.active(&t).await {
+                return;
+            }
+            let (ok, err) = self.try_candidates(&t, notify, prefer, generation).await;
+            if generation != t.generation() {
+                return;
+            }
             if ok {
                 return;
             }
@@ -552,7 +584,7 @@ impl Manager {
             )
             .await;
             tokio::time::sleep(backoff).await;
-            if !self.active(&t).await {
+            if generation != t.generation() || !self.active(&t).await {
                 return;
             }
             self.refresh_nodes().await.ok();
@@ -565,12 +597,13 @@ impl Manager {
         t: &Arc<Tunnel>,
         notify: bool,
         prefer_current: bool,
+        generation: u64,
     ) -> (bool, String) {
         let candidates = self.candidates_for(t, prefer_current).await;
         let home = t.node().await.country_code;
         let mut last = "没有可用候选节点".to_string();
         for (i, node) in candidates.into_iter().enumerate() {
-            if !self.active(t).await {
+            if generation != t.generation() || !self.active(t).await {
                 return (false, last);
             }
             if i > 0 && self.used_hosts(Some(t.slot)).await.contains(&node.hostname) {
@@ -585,6 +618,9 @@ impl Manager {
             t.set_status("starting", &note).await;
             match t.runtime.start(&node).await {
                 Ok(ip) => {
+                    if generation != t.generation() || !self.active(t).await {
+                        return (false, last);
+                    }
                     t.set_up(ip).await;
                     self.persist().await.ok();
                     if notify {
@@ -593,6 +629,9 @@ impl Manager {
                     return (true, String::new());
                 }
                 Err(e) => {
+                    if generation != t.generation() || !self.active(t).await {
+                        return (false, last);
+                    }
                     last = e.to_string();
                     let _ = t.runtime.stop().await;
                     self.avoid_failed(t, &node.hostname).await;
@@ -952,3 +991,7 @@ async fn p_resync(m: &Manager, t: &Arc<Tunnel>) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "manager_test.rs"]
+mod tests;

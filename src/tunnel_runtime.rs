@@ -140,6 +140,7 @@ pub struct LinuxTunnelRuntime {
     proc: Mutex<Option<OvpnProc>>,
     listener: Mutex<Option<Arc<TcpListener>>>,
     accepting: AtomicBool,
+    lifecycle: Mutex<()>,
     stop: Mutex<CancellationToken>,
     dead: Arc<StdMutex<Option<String>>>,
 }
@@ -169,6 +170,7 @@ impl LinuxTunnelRuntime {
             proc: Mutex::new(None),
             listener: Mutex::new(None),
             accepting: AtomicBool::new(false),
+            lifecycle: Mutex::new(()),
             stop: Mutex::new(CancellationToken::new()),
             dead: Arc::new(StdMutex::new(None)),
         }
@@ -184,6 +186,7 @@ impl LinuxTunnelRuntime {
         self.listener.lock().await.take();
         if let Some(p) = self.proc.lock().await.take() {
             p.kill();
+            let _ = tokio::time::timeout(Duration::from_secs(3), p.wait_for_exit()).await;
         }
         self.netns.teardown();
     }
@@ -237,7 +240,13 @@ impl LinuxTunnelRuntime {
                             Ok((stream, _)) => {
                                 let c = cred.read().await.clone();
                                 let d = dialer.clone();
-                                tokio::spawn(async move { let _ = serve_socks(stream, Some(&c), d.as_ref()).await; });
+                                let stop = stop.clone();
+                                tokio::spawn(async move {
+                                    tokio::select! {
+                                        _ = serve_socks(stream, Some(&c), d.as_ref()) => {}
+                                        _ = stop.cancelled() => {}
+                                    }
+                                });
                             }
                             Err(error)
                                 if matches!(
@@ -263,6 +272,7 @@ impl LinuxTunnelRuntime {
 #[async_trait]
 impl TunnelRuntime for LinuxTunnelRuntime {
     async fn start(&self, node: &Node) -> Result<String> {
+        let _lifecycle = self.lifecycle.lock().await;
         self.stop_old().await;
         *self.dead.lock().unwrap_or_else(|p| p.into_inner()) = None;
         let direct = self.resolve_direct_ips(node).await;
@@ -331,6 +341,7 @@ impl TunnelRuntime for LinuxTunnelRuntime {
         args.extend(ovpn_tuning(budget, mssfix));
 
         let proc = spawn_openvpn_in_netns(&self.netns.name(), &bin, &args).await?;
+        *self.proc.lock().await = Some(proc.clone());
         let ready = wait_tun_up(&proc, &self.netns.name(), budget).await;
         if let Err(e) = ready {
             let hint = ovpn_log_hint(&log);
@@ -339,14 +350,15 @@ impl TunnelRuntime for LinuxTunnelRuntime {
             } else {
                 format!("{e}；{hint}")
             };
-            proc.kill();
-            self.netns.teardown();
+            self.stop_old().await;
             return Err(anyhow!(one_line(&why, 500)));
         }
         if let (Some(svc), Some(a)) = (&self.warp, &acc) {
-            svc.split(&self.netns, node, a).await?;
+            if let Err(error) = svc.split(&self.netns, node, a).await {
+                self.stop_old().await;
+                return Err(error);
+            }
         }
-        *self.proc.lock().await = Some(proc.clone());
         let watch = proc.clone();
         let watch_log = log.clone();
         let dead = self.dead.clone();
@@ -356,11 +368,21 @@ impl TunnelRuntime for LinuxTunnelRuntime {
                 *dead.lock().unwrap_or_else(|p| p.into_inner()) = Some(why);
             }
         });
-        self.start_listener().await?;
-        self.probe_exit_ip().await
+        if let Err(error) = self.start_listener().await {
+            self.stop_old().await;
+            return Err(error);
+        }
+        match self.probe_exit_ip().await {
+            Ok(ip) => Ok(ip),
+            Err(error) => {
+                self.stop_old().await;
+                Err(error)
+            }
+        }
     }
 
     async fn stop(&self) -> Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
         self.stop_old().await;
         Ok(())
     }

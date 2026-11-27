@@ -1090,7 +1090,9 @@ impl PoolFillState {
         ledger: HashMap<String, DateTime<Utc>>,
         store: &PoolStore,
     ) {
-        if store.get(id).is_some() {
+        if let Some(pool) = store.get(id) {
+            let members: HashSet<&str> = pool.hosts.iter().map(String::as_str).collect();
+            ledger.retain(|host, _| members.contains(host.as_str()));
             self.first_dead.insert(id.to_string(), ledger);
         } else {
             self.first_dead.remove(id);

@@ -844,20 +844,45 @@ impl PoolService {
         for index in 0..assessment.need {
             let preferred_only = index < preferred_slots;
             let old_host = fill_slot(&replacements, index).unwrap_or("");
-            let picks = if preferred_only {
-                &mut preferred_picks
-            } else {
-                &mut other_picks
-            };
-            let mut reused_here = false;
-            while let Some(host) = picks.next() {
+            let mut completed = false;
+            if preferred_only {
+                while let Some(host) = preferred_picks.next() {
+                    if self.reuse_one(pool, old_host, &host).await {
+                        reused += 1;
+                        completed = true;
+                        break;
+                    }
+                }
+                if !completed && room > 0 {
+                    room -= 1;
+                    let current_members = self.resolve_members(&pool.id).await;
+                    let avoid = {
+                        let state = lock_unpoisoned(&self.inner.state);
+                        fill_avoid(&current_members, &state.fill.bad_until, Utc::now())
+                    };
+                    match self.pick_fill_node(pool, &avoid, true).await {
+                        Ok(node) => match self.fill_one(pool, node, old_host).await {
+                            Ok(()) => {
+                                created += 1;
+                                completed = true;
+                            }
+                            Err(host) => reason = Some(fill_failure_reason(&host)),
+                        },
+                        Err(err) => reason = Some(err.to_string()),
+                    }
+                }
+            }
+            if completed {
+                continue;
+            }
+            while let Some(host) = other_picks.next() {
                 if self.reuse_one(pool, old_host, &host).await {
                     reused += 1;
-                    reused_here = true;
+                    completed = true;
                     break;
                 }
             }
-            if reused_here {
+            if completed {
                 continue;
             }
             if room == 0 {
@@ -869,7 +894,7 @@ impl PoolService {
                 let state = lock_unpoisoned(&self.inner.state);
                 fill_avoid(&current_members, &state.fill.bad_until, Utc::now())
             };
-            let node = match self.pick_fill_node(pool, &avoid, preferred_only).await {
+            let node = match self.pick_fill_node(pool, &avoid, false).await {
                 Ok(node) => node,
                 Err(err) => {
                     reason = Some(err.to_string());

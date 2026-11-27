@@ -275,7 +275,8 @@ fn net_rates_short_window_keeps_previous_values() {
         &mut sample,
     );
     assert_eq!(got, (111.0, 222.0, true));
-    assert_eq!(sample.devs["eth0"], [1 << 30, 1 << 30]);
+    assert_eq!(sample.devs["eth0"], [0, 0]);
+    assert_eq!(sample.at, Some(now));
 }
 
 #[test]

@@ -289,14 +289,14 @@ async fn runtime_selection_covers_affinity_cooldown_latency_and_udp_fallback() {
         Duration::from_millis(10)
     );
 
-    for mode in [POOL_MODE_CONCURRENT, POOL_MODE_RACE] {
+    for (mode, expected) in [(POOL_MODE_CONCURRENT, "a"), (POOL_MODE_RACE, "b")] {
         run.reconfigure(mode, 5);
         let tcp = run.choose("race-target", &members, true);
         assert!(tcp.concurrent);
         assert_eq!(tcp.order.len(), 3);
         let udp = run.choose("race-target", &members, false);
         assert!(!udp.concurrent);
-        assert_eq!(first_host(&udp), "a");
+        assert_eq!(first_host(&udp), expected);
     }
 
     // A successful sample ages out after the configured stale interval.

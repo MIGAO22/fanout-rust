@@ -862,8 +862,13 @@ fn fill_ledger_snapshots_merge_replace_and_drop() {
         next: 2,
         pools: vec![autofill_pool(1, &["a"])],
     };
-    state.merge_dead("p1", HashMap::from([("a".to_string(), now)]), &store);
+    state.merge_dead(
+        "p1",
+        HashMap::from([("a".to_string(), now), ("stale".to_string(), now)]),
+        &store,
+    );
     assert_eq!(state.dead_snapshot("p1").get("a"), Some(&now));
+    assert!(!state.dead_snapshot("p1").contains_key("stale"));
     state.forget_dead("p1", "a");
     assert!(!state.dead_snapshot("p1").contains_key("a"));
     state.set_note("p1", Some("waiting".into()));

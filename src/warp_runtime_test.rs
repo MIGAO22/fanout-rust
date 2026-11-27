@@ -11,7 +11,7 @@ async fn warp_store_read_errors_are_not_treated_as_empty() {
         Instance::default(),
         Arc::new(RwLock::new(WebSettings::default())),
     );
-    assert!(result.await.is_err());
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -22,7 +22,6 @@ async fn missing_warp_store_is_empty() {
         Instance::default(),
         Arc::new(RwLock::new(WebSettings::default())),
     )
-    .await
     .unwrap();
     assert!(service.all().await.is_empty());
 }

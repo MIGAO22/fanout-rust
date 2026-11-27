@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use csv::ReaderBuilder;
-use futures::StreamExt;
 use ipnet::Ipv4Net;
 use rand::Rng;
 use reqwest::{header::HeaderValue, Client, StatusCode};

@@ -36,6 +36,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use crate::jobs::JobHandle;
 use crate::models::ClientBinStatus;
 pub use crate::models::UpdateStatus;
+use crate::process::format_exit_status;
 use crate::util::{atomic_write, first_line, path_string, write_file};
 
 #[cfg(test)]

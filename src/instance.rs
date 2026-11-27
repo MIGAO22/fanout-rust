@@ -115,8 +115,8 @@ impl Drop for NetBaseLock {
 }
 
 fn lock_netbase_assignment() -> Result<NetBaseLock> {
-    let file =
-        open_file("/run/lock/fanout-netbase.lock", 0o600, true).context("打开网段分配锁失败")?;
+    let file = open_file(Path::new("/run/lock/fanout-netbase.lock"), 0o600, true)
+        .context("打开网段分配锁失败")?;
     #[cfg(unix)]
     {
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };

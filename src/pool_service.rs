@@ -205,7 +205,8 @@ impl PoolRun {
             choice.concurrent = false;
             if !choice.order.is_empty() {
                 let cursor = self.udp_cursor.fetch_add(1, Ordering::Relaxed);
-                choice.order.rotate_left(cursor % choice.order.len());
+                let len = choice.order.len();
+                choice.order.rotate_left(cursor % len);
             }
         }
         choice
@@ -289,6 +290,7 @@ impl PoolService {
         manager: Arc<Manager>,
         mut store: PoolStore,
     ) -> Result<Self> {
+        let dir = dir.into();
         let mut repaired = false;
         for pool in &mut store.pools {
             pool.normalize();
@@ -310,7 +312,7 @@ impl PoolService {
         store.next = store.next.max(highest.saturating_add(1)).max(1);
 
         let inner = Arc::new(PoolServiceInner {
-            dir: dir.into(),
+            dir,
             manager,
             state: StdMutex::new(ServiceState {
                 store,

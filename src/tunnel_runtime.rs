@@ -100,12 +100,13 @@ async fn resolve_ipv4_targets(dialer: &NetnsDialer, addr: &str) -> Result<Vec<So
         let result = dialer.resolve_ipv4(host, port).await;
         match result {
             Ok(addresses) => {
-                let mut cache = lock_unpoisoned(dns_cache());
-                if cache.len() >= DNS_CACHE_LIMIT {
-                    cache.clear();
+                {
+                    let mut cache = lock_unpoisoned(dns_cache());
+                    if cache.len() >= DNS_CACHE_LIMIT {
+                        cache.clear();
+                    }
+                    cache.insert(key.clone(), (addresses.clone(), Instant::now()));
                 }
-                cache.insert(key.clone(), (addresses.clone(), Instant::now()));
-                drop(cache);
                 notify.notify_waiters();
                 notify.notify_one();
                 dns_inflight().lock().await.remove(&key);

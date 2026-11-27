@@ -949,15 +949,18 @@ pub fn build_xray_config(
 
     let mut rules = Vec::new();
     for ib in inbounds.iter().filter(|ib| ib.enable) {
-        if ib.bound_to.is_empty()
-            || (!live.contains(&ib.bound_to) && !pool_tags.contains(&ib.bound_to))
-        {
+        if ib.bound_to.is_empty() {
             continue;
         }
+        let outbound = if live.contains(&ib.bound_to) || pool_tags.contains(&ib.bound_to) {
+            egress_tag(&ib.bound_to)
+        } else {
+            "block".to_string()
+        };
         rules.push(json!({
             "type": "field",
             "inboundTag": [ib.tag()],
-            "outboundTag": egress_tag(&ib.bound_to),
+            "outboundTag": outbound,
         }));
     }
 

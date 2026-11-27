@@ -29,7 +29,6 @@ pub const POOL_MAX_RR_STEP: usize = 1000;
 pub const POOL_TRY_TIMEOUT: Duration = Duration::from_secs(4);
 pub const POOL_AFFINITY_MAX: usize = 4096;
 pub const POOL_TARGET_STATS_MAX: usize = 4096;
-pub const POOL_SWITCH_FLOOR: Duration = Duration::from_millis(600);
 pub const POOL_SWITCH_RATIO: u32 = 2;
 pub const POOL_BALANCE_SPREAD_FLOOR: Duration = Duration::from_millis(100);
 pub const POOL_EWMA_ALPHA: f64 = 0.3;
@@ -538,12 +537,11 @@ impl PoolPolicy {
         if best.latency.is_zero() {
             return true;
         }
-        member.latency <= POOL_SWITCH_FLOOR
-            || member.latency.as_nanos()
-                <= best
-                    .latency
-                    .as_nanos()
-                    .saturating_mul(u128::from(POOL_SWITCH_RATIO))
+        member.latency.as_nanos()
+            <= best
+                .latency
+                .as_nanos()
+                .saturating_mul(u128::from(POOL_SWITCH_RATIO))
     }
 
     fn bind(&mut self, target: &str, host: &str) {

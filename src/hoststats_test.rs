@@ -196,6 +196,36 @@ fn net_rates_first_window_is_not_ready() {
 }
 
 #[test]
+fn net_rates_short_window_does_not_advance_the_baseline() {
+    let now = Instant::now();
+    let mut sample = NetCounters {
+        at: Some(now),
+        devs: devs(&[("eth0", 100, 40)]),
+        has: true,
+        ..NetCounters::default()
+    };
+    let (_, _, ready) = net_rates_at(
+        devs(&[("eth0", 900, 400)]),
+        &["eth0".into()],
+        now + Duration::from_millis(100),
+        &mut sample,
+    );
+    assert!(!ready);
+    assert_eq!(sample.at, Some(now));
+    assert_eq!(sample.devs["eth0"], [100, 40]);
+
+    let (up, down, ready) = net_rates_at(
+        devs(&[("eth0", 1_100, 440)]),
+        &["eth0".into()],
+        now + Duration::from_secs(1),
+        &mut sample,
+    );
+    assert!(ready);
+    assert_eq!(up, 400.0);
+    assert_eq!(down, 1_000.0);
+}
+
+#[test]
 fn net_rates_uses_byte_deltas_and_skips_new_or_reset_interfaces() {
     let now = Instant::now();
     let mut sample = NetCounters {

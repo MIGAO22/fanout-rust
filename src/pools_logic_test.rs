@@ -129,6 +129,15 @@ fn balance_spreads_similar_latency_members_and_rejects_slow_tail() {
     assert_eq!(first_host(&policy.pick("t0", &[slow, fast])), "fast");
 
     let mut policy = PoolPolicy::new(POOL_MODE_BALANCE, 1);
+    let slow = up_member("slow", Duration::from_millis(500));
+    let fast = up_member("fast", Duration::from_millis(50));
+    assert_eq!(
+        first_host(&policy.pick("t0", std::slice::from_ref(&slow))),
+        "slow"
+    );
+    assert_eq!(first_host(&policy.pick("t0", &[slow, fast])), "fast");
+
+    let mut policy = PoolPolicy::new(POOL_MODE_BALANCE, 1);
     let a = up_member("a", Duration::from_millis(100));
     let b = up_member("b", Duration::from_millis(40));
     let tail = up_member("tail", Duration::from_secs(2));

@@ -233,6 +233,16 @@ async fn replies_match_rfc1928_wire_format() {
 }
 
 #[test]
+fn udp_relay_only_accepts_the_tcp_peers_address() {
+    let peer = "127.0.0.1".parse::<IpAddr>().unwrap();
+    assert!(udp_source_allowed("127.0.0.1:53000".parse().unwrap(), peer));
+    assert!(!udp_source_allowed(
+        "127.0.0.2:53000".parse().unwrap(),
+        peer
+    ));
+}
+
+#[test]
 fn parses_ipv4_udp_request() {
     let bytes = [0, 0, 0, ATYP_IPV4, 8, 8, 8, 8, 0, 53, 1, 2, 3];
     let request = parse_udp_req_header(&bytes).unwrap();

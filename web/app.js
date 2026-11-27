@@ -130,6 +130,7 @@ let regions = [];
 let region = '';
 let regionsLoaded = false;
 let curDetail = null;
+let detailSeq = 0;
 let curCred = null;
 let curSettings = null;
 let curBackend = null;
@@ -1411,6 +1412,7 @@ $('#stopall').onclick = async e => {
 
 // 详情弹窗的重绘要跟轮询解耦：正在编辑时被 poll 刷掉输入会很烦
 async function openDetail(id){
+  const seq = ++detailSeq;
   $('#dbody').innerHTML = '<div class="skel"><div class="l w40"></div>'
     + '<div class="l w25"></div><div class="l w60"></div><div class="l"></div></div>';
   curDetail = null;
@@ -1418,12 +1420,14 @@ async function openDetail(id){
   openModal('detail');
   try{
     const d = await api('/api/xui/detail?id=' + id);
+    if(seq !== detailSeq) return;
     curDetail = d;
     renderDetail(d);
     // xray-cf-lite 的节点归它自己管，不给删除
     $('#ddel').hidden = isXCL();
     $('#ddel').disabled = isXCL();
   }catch(err){
+    if(seq !== detailSeq) return;
     $('#dbody').innerHTML = '<div class="errbox"><b>读取失败</b>' + esc(err.message) + '</div>';
   }
 }
@@ -1733,13 +1737,16 @@ $('#crcopy').onclick = () => { copy($('#crurl').textContent); };
 $('#crsave').onclick = async e => {
   if(!curCred) return;
   const btn = e.target; btn.disabled = true;
-  const q = new URLSearchParams({
-    slot: curCred.slot,
-    user: $('#cruser').value.trim(),
-    pass: $('#crpass').value.trim(),
-  });
   try{
-    const r = await api('/api/cred?' + q, {method:'POST'});
+    const r = await api('/api/cred', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        slot: curCred.slot,
+        user: $('#cruser').value.trim(),
+        pass: $('#crpass').value.trim(),
+      }),
+    });
     $('#cruser').value = r.user;
     $('#crpass').value = r.pass;
     refreshCredURL();

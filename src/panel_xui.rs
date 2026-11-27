@@ -1177,7 +1177,7 @@ impl Panel for XUI {
     }
 
     async fn on_tunnels_changed(&self) -> Result<()> {
-        Ok(())
+        self.resync_runtime().await
     }
 
     async fn close(&self) -> Result<()> {

@@ -319,9 +319,10 @@ fn xray_config_binds_only_live_tunnels_and_keeps_pool_fail_closed() {
     assert_eq!(config["inbounds"].as_array().unwrap().len(), 3);
 
     let rules = config["routing"]["rules"].as_array().unwrap();
-    assert_eq!(rules.len(), 2);
+    assert_eq!(rules.len(), 3);
     assert_eq!(rules[0]["outboundTag"], "fanout-jp1");
-    assert_eq!(rules[1]["outboundTag"], "fanout-pool-main");
+    assert_eq!(rules[1]["outboundTag"], "block");
+    assert_eq!(rules[2]["outboundTag"], "fanout-pool-main");
     let server = &config["outbounds"][2]["settings"]["servers"][0];
     assert_eq!(server["address"], "127.0.0.1");
     assert_eq!(server["port"], 1080);

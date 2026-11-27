@@ -36,6 +36,7 @@ pub const REP_COMMAND_NOT_SUPPORTED: u8 = 0x07;
 pub const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(30);
 pub const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const RELAY_BUFFER_SIZE: usize = 32 * 1024;
+const UDP_MAX_SESSIONS: usize = 256;
 
 /// Errors whose text is part of the original Go implementation.
 #[derive(Debug)]
@@ -459,22 +460,40 @@ struct UdpSession {
 
 type SessionMap = Arc<Mutex<HashMap<String, Arc<UdpSession>>>>;
 
+fn udp_source_allowed(source: SocketAddr, peer_ip: IpAddr) -> bool {
+    source.ip() == peer_ip
+}
+
 /// Serves one UDP ASSOCIATE until its TCP control connection closes or the
 /// relay has no client datagrams for 60 seconds.
 pub async fn serve_udp_associate<D>(mut client: TcpStream, dial: &D) -> Result<(), SocksError>
 where
     D: SocksDialer + ?Sized,
 {
-    let relay = match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await {
-        Ok(relay) => Arc::new(relay),
+    let local = match client.local_addr() {
+        Ok(local) => local,
         Err(err) => {
             let _ = socks_reply(&mut client, REP_GENERAL_FAILURE).await;
             return Err(err.into());
         }
     };
-
-    let local = match client.local_addr() {
-        Ok(local) => local,
+    let peer_ip = match client.peer_addr() {
+        Ok(peer) => peer.ip(),
+        Err(err) => {
+            let _ = socks_reply(&mut client, REP_GENERAL_FAILURE).await;
+            return Err(err.into());
+        }
+    };
+    let bind_ip = match local {
+        SocketAddr::V4(local) => IpAddr::V4(*local.ip()),
+        SocketAddr::V6(local) => local
+            .ip()
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(*local.ip())),
+    };
+    let relay = match UdpSocket::bind((bind_ip, 0)).await {
+        Ok(relay) => Arc::new(relay),
         Err(err) => {
             let _ = socks_reply(&mut client, REP_GENERAL_FAILURE).await;
             return Err(err.into());
@@ -509,8 +528,11 @@ where
     let result = loop {
         let received = tokio::select! {
             control = control_read.read(&mut control_buf) => {
-                let _ = control;
-                break Ok(());
+                match control {
+                    Ok(0) => break Ok(()),
+                    Ok(_) => continue,
+                    Err(err) => break Err(err),
+                }
             }
             received = timeout(UDP_IDLE_TIMEOUT, relay.recv_from(&mut buf)) => {
                 match received {
@@ -521,6 +543,9 @@ where
             }
         };
         let (len, src) = received;
+        if !udp_source_allowed(src, peer_ip) {
+            continue;
+        }
         let Some(request) = parse_udp_req_header(&buf[..len]) else {
             continue;
         };
@@ -531,6 +556,10 @@ where
         let session = if let Some(session) = existing {
             session
         } else {
+            let full = { sessions.lock().await.len() >= UDP_MAX_SESSIONS };
+            if full {
+                continue;
+            }
             let socket = match dial.dial(DialNetwork::Udp, &dest).await {
                 Ok(DialSocket::Udp(socket)) => socket,
                 _ => continue,
@@ -545,6 +574,8 @@ where
             let mut guard = sessions.lock().await;
             if let Some(session) = guard.get(&key) {
                 Arc::clone(session)
+            } else if guard.len() >= UDP_MAX_SESSIONS {
+                continue;
             } else {
                 guard.insert(key.clone(), Arc::clone(&candidate));
                 drop(guard);

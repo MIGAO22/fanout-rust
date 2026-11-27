@@ -211,13 +211,23 @@ esac
 echo "      下载预编译版本 (${GOARCH})"
 TMP=$(mktemp -d)
 URL="https://github.com/${REPO}/releases/latest/download/fanout-rust-linux-${GOARCH}.tar.gz"
-if ! curl -fsSL "$URL" -o "$TMP/f.tar.gz"; then
+if ! curl -fsSL "$URL" -o "$TMP/f.tar.gz" \
+   || ! curl -fsSL "https://github.com/${REPO}/releases/latest/download/checksums.txt" -o "$TMP/checksums.txt"; then
   echo "      下载失败: $URL" >&2
   echo "      该仓库没有 v* 的 Release 时这条地址就是 404；请先发布 Release 再重试" >&2
   exit 1
 fi
+if ! (cd "$TMP" && grep -F "fanout-rust-linux-${GOARCH}.tar.gz" checksums.txt | sha256sum -c -); then
+  echo "      校验和失败，拒绝安装" >&2
+  exit 1
+fi
 tar xzf "$TMP/f.tar.gz" -C "$TMP"
-install -m 755 "$TMP/fanout-rust" "$BIN"
+"$TMP/fanout-rust" -version >/dev/null
+if [[ -f "$BIN" ]]; then
+  cp -p "$BIN" "$BIN.prev"
+fi
+install -m 755 "$TMP/fanout-rust" "$BIN.new"
+mv -f "$BIN.new" "$BIN"
 if [[ ! -f fanout-rust.service ]]; then
   if [[ -f "$TMP/fanout-rust.service" ]]; then
     cp "$TMP/fanout-rust.service" .

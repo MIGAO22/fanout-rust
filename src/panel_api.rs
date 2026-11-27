@@ -322,10 +322,18 @@ pub async fn inbound_create(
     // Go's create handler ignores strconv errors and lets the backend choose a
     // random port for zero. Preserve that behavior while still rejecting an
     // explicitly negative/out-of-range value in the shared spec parser.
-    let port = query
-        .get("port")
-        .and_then(|port| port.parse::<i64>().ok())
-        .unwrap_or(0);
+    let port = match query.get("port").filter(|port| !port.is_empty()) {
+        Some(raw) => match raw.parse::<u16>() {
+            Ok(port) => port,
+            Err(_) => return bad_request("端口无效"),
+        },
+        None => 0,
+    };
+    if let Some(raw) = query.get("enable").filter(|enable| !enable.is_empty()) {
+        if !matches!(raw.as_str(), "0" | "1") {
+            return bad_request("enable 只能是 0 或 1");
+        }
+    }
     spec.insert("port".into(), json!(port));
     match panel.create_inbound(&Value::Object(spec)).await {
         Ok(created) => panel_json_response(created),
@@ -351,12 +359,18 @@ pub async fn inbound_update(
         let Ok(port) = raw.parse::<u16>() else {
             return bad_request("端口无效");
         };
+        if port == 0 {
+            return bad_request("端口不能为 0");
+        }
         patch.port = Some(port);
     }
     if let Some(remark) = query.get("remark") {
         patch.remark = Some(remark.clone());
     }
     if let Some(raw) = query.get("enable").filter(|enable| !enable.is_empty()) {
+        if !matches!(raw.as_str(), "0" | "1") {
+            return bad_request("enable 只能是 0 或 1");
+        }
         patch.enable = Some(raw == "1");
     }
     match panel.update_inbound(&id, &patch).await {

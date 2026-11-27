@@ -412,18 +412,22 @@ fn net_rates_at(
     now: Instant,
     sample: &mut NetCounters,
 ) -> (f64, f64, bool) {
-    let prev = std::mem::replace(&mut sample.devs, cur);
     let had_prev = sample.has;
     let dt = sample
         .at
         .map(|at| now.saturating_duration_since(at).as_secs_f64())
         .unwrap_or(0.0);
-    sample.at = Some(now);
-    sample.has = true;
-
-    if !had_prev || dt < NET_MIN_WINDOW.as_secs_f64() {
+    if !had_prev {
+        sample.devs = cur;
+        sample.at = Some(now);
+        sample.has = true;
         return (sample.up, sample.down, sample.ready);
     }
+    if dt < NET_MIN_WINDOW.as_secs_f64() {
+        return (sample.up, sample.down, sample.ready);
+    }
+    let prev = std::mem::replace(&mut sample.devs, cur);
+    sample.at = Some(now);
 
     let mut rx = 0u64;
     let mut tx = 0u64;

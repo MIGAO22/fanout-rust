@@ -13,7 +13,7 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{Mutex, RwLock},
+    sync::{Mutex, Notify, RwLock},
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
@@ -51,9 +51,14 @@ type DnsCacheKey = (String, String, u16);
 type DnsCache = StdMutex<HashMap<DnsCacheKey, (Vec<SocketAddr>, Instant)>>;
 
 static DNS_CACHE: OnceLock<DnsCache> = OnceLock::new();
+static DNS_INFLIGHT: OnceLock<Mutex<HashMap<DnsCacheKey, Arc<Notify>>>> = OnceLock::new();
 
 fn dns_cache() -> &'static DnsCache {
     DNS_CACHE.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn dns_inflight() -> &'static Mutex<HashMap<DnsCacheKey, Arc<Notify>>> {
+    DNS_INFLIGHT.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn cached_ipv4_targets(key: &DnsCacheKey) -> Option<Vec<SocketAddr>> {
@@ -74,19 +79,46 @@ async fn resolve_ipv4_targets(dialer: &NetnsDialer, addr: &str) -> Result<Vec<So
         return Ok(vec![SocketAddr::from((ip, port))]);
     }
     let key = (dialer.namespace().to_string(), host.to_string(), port);
-    if let Some(cached) = cached_ipv4_targets(&key) {
-        return Ok(cached);
+    loop {
+        if let Some(cached) = cached_ipv4_targets(&key) {
+            return Ok(cached);
+        }
+        let (notify, owner) = {
+            let mut inflight = dns_inflight().lock().await;
+            if let Some(notify) = inflight.get(&key) {
+                (Arc::clone(notify), false)
+            } else {
+                let notify = Arc::new(Notify::new());
+                inflight.insert(key.clone(), Arc::clone(&notify));
+                (notify, true)
+            }
+        };
+        if !owner {
+            notify.notified().await;
+            continue;
+        }
+        let result = dialer.resolve_ipv4(host, port).await;
+        match result {
+            Ok(addresses) => {
+                let mut cache = lock_unpoisoned(dns_cache());
+                if cache.len() >= DNS_CACHE_LIMIT {
+                    cache.clear();
+                }
+                cache.insert(key.clone(), (addresses.clone(), Instant::now()));
+                drop(cache);
+                notify.notify_waiters();
+                notify.notify_one();
+                dns_inflight().lock().await.remove(&key);
+                return Ok(addresses);
+            }
+            Err(error) => {
+                notify.notify_waiters();
+                notify.notify_one();
+                dns_inflight().lock().await.remove(&key);
+                return Err(error.context(format!("解析目标 {addr} 失败")));
+            }
+        }
     }
-    let addresses = dialer
-        .resolve_ipv4(host, port)
-        .await
-        .with_context(|| format!("解析目标 {addr} 失败"))?;
-    let mut cache = lock_unpoisoned(dns_cache());
-    if cache.len() >= DNS_CACHE_LIMIT {
-        cache.clear();
-    }
-    cache.insert(key, (addresses.clone(), Instant::now()));
-    Ok(addresses)
 }
 
 fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -305,7 +337,11 @@ impl TunnelRuntime for LinuxTunnelRuntime {
         write_file(&auth, b"vpn\nvpn\n", 0o600)?;
 
         let bin = self.openvpn_binary();
-        let version_out = output_command(&bin, &["--version".into()])?;
+        let version_bin = bin.clone();
+        let version_out = tokio::task::spawn_blocking(move || {
+            output_command(&version_bin, &["--version".into()])
+        })
+        .await??;
         let version_text = String::from_utf8_lossy(&version_out.stdout);
         let version = version_text
             .lines()
@@ -419,8 +455,9 @@ impl TunnelRuntime for LinuxTunnelRuntime {
                 secs.to_string(),
                 (*url).into(),
             ];
-            match output_command("ip", &args) {
-                Ok(out) => {
+            let probe = tokio::task::spawn_blocking(move || output_command("ip", &args)).await;
+            match probe {
+                Ok(Ok(out)) => {
                     let ip = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     if let Ok(v4) = ip.parse::<Ipv4Addr>() {
                         if self.settings.read().await.warp().enabled
@@ -433,7 +470,8 @@ impl TunnelRuntime for LinuxTunnelRuntime {
                     }
                     reason = format!("返回不是 IPv4: {}", one_line(&ip, 120));
                 }
-                Err(e) => reason = e.to_string(),
+                Ok(Err(e)) => reason = e.to_string(),
+                Err(e) => reason = format!("出口探测任务失败: {e}"),
             }
         }
         bail!("查询出口 IP 失败: {}", one_line(&reason, 300))

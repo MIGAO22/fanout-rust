@@ -1,6 +1,12 @@
 use anyhow::{bail, Result};
 use futures::StreamExt;
-use std::{collections::HashMap, path::Path, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     io::AsyncWriteExt,
     sync::{Mutex, RwLock, Semaphore},
@@ -45,7 +51,11 @@ impl WarpService {
         instance: Instance,
         settings: Arc<RwLock<WebSettings>>,
     ) -> Result<Arc<Self>> {
-        let blob = std::fs::read(dir.join("warp.json")).unwrap_or_default();
+        let blob = match std::fs::read(dir.join("warp.json")) {
+            Ok(blob) => blob,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
         let accounts = if blob.is_empty() {
             Vec::new()
         } else {
@@ -104,7 +114,8 @@ impl WarpService {
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|value| value.to_str().ok())
                     .and_then(|value| value.parse::<u64>().ok())
-                    .unwrap_or_else(|| (2_u64 << attempt).min(30));
+                    .unwrap_or_else(|| (2_u64 << attempt).min(30))
+                    .clamp(1, 60);
                 if attempt + 1 == WARP_REGISTER_ATTEMPTS {
                     anyhow::bail!("Cloudflare 注册限流，重试 {} 次仍失败", attempt + 1);
                 }
@@ -146,23 +157,27 @@ impl WarpService {
             let accounts = self.accounts.lock().await;
             accounts.iter().find(|a| a.slot == slot).cloned()
         };
-        if let Some(a) = existing {
-            if a.version == version {
-                return Ok(a);
+        if let Some(account) = existing.as_ref() {
+            if account.version == version {
+                return Ok(account.clone());
             }
-            unregister(&self.client, &a).await;
-            self.accounts.lock().await.retain(|a| a.slot != slot);
         }
-        let a = self.register(slot, version).await?;
+        let account = self.register(slot, version).await?;
         let mut accounts = self.accounts.lock().await;
-        if let Some(current) = accounts.iter().find(|a| a.slot == slot) {
-            if current.version == version {
-                return Ok(current.clone());
+        let previous = accounts.clone();
+        accounts.retain(|a| a.slot != slot);
+        accounts.push(account.clone());
+        if let Err(error) = self.save(&accounts).await {
+            *accounts = previous;
+            return Err(error);
+        }
+        drop(accounts);
+        if let Some(old) = existing {
+            if let Err(error) = unregister(&self.client, &old).await {
+                tracing::warn!("新 WARP 账号已保存，但注销旧账号失败: {error}");
             }
         }
-        accounts.push(a.clone());
-        self.save(&accounts).await?;
-        Ok(a)
+        Ok(account)
     }
 
     pub async fn rotate(&self, slot: usize, version: &str) -> Result<WarpAccount> {
@@ -180,12 +195,18 @@ impl WarpService {
         let account = self.register(slot, version).await?;
         {
             let mut accounts = self.accounts.lock().await;
+            let previous = accounts.clone();
             accounts.retain(|a| a.slot != slot);
             accounts.push(account.clone());
-            self.save(&accounts).await?;
+            if let Err(error) = self.save(&accounts).await {
+                *accounts = previous;
+                return Err(error);
+            }
         }
         if let Some(old) = old {
-            unregister(&self.client, &old).await;
+            if let Err(error) = unregister(&self.client, &old).await {
+                tracing::warn!("新 WARP 账号已保存，但注销旧账号失败: {error}");
+            }
         }
         Ok(account)
     }
@@ -198,12 +219,21 @@ impl WarpService {
             .acquire()
             .await
             .map_err(|_| anyhow::anyhow!("WARP 服务已关闭"))?;
-        let mut accounts = self.accounts.lock().await;
-        if let Some(a) = accounts.iter().find(|a| a.slot == slot) {
-            unregister(&self.client, a).await;
+        let existing = {
+            let accounts = self.accounts.lock().await;
+            accounts.iter().find(|a| a.slot == slot).cloned()
+        };
+        if let Some(account) = existing {
+            unregister(&self.client, &account).await?;
         }
+        let mut accounts = self.accounts.lock().await;
+        let previous = accounts.clone();
         accounts.retain(|a| a.slot != slot);
-        self.save(&accounts).await
+        if let Err(error) = self.save(&accounts).await {
+            *accounts = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub async fn prune(&self, active_slots: &std::collections::HashSet<usize>) -> Result<()> {
@@ -213,23 +243,34 @@ impl WarpService {
             .await
             .map_err(|_| anyhow::anyhow!("WARP 服务已关闭"))?;
         let removed = {
-            let mut accounts = self.accounts.lock().await;
-            let removed: Vec<_> = accounts
+            let accounts = self.accounts.lock().await;
+            accounts
                 .iter()
                 .filter(|account| !active_slots.contains(&account.slot))
                 .cloned()
-                .collect();
-            if removed.is_empty() {
-                return Ok(());
-            }
-            accounts.retain(|account| active_slots.contains(&account.slot));
-            self.save(&accounts).await?;
-            removed
+                .collect::<Vec<_>>()
         };
-        for account in removed {
-            unregister(&self.client, &account).await;
+        if removed.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let results = futures::future::join_all(
+            removed
+                .iter()
+                .map(|account| unregister(&self.client, account)),
+        )
+        .await;
+        let mut failed = HashSet::new();
+        for (account, result) in removed.iter().zip(results) {
+            if let Err(error) = result {
+                failed.insert(account.slot);
+                tracing::warn!("清理 WARP 账号 {} 失败: {error}", account.slot);
+            }
+        }
+        let mut accounts = self.accounts.lock().await;
+        accounts.retain(|account| {
+            active_slots.contains(&account.slot) || failed.contains(&account.slot)
+        });
+        self.save(&accounts).await
     }
 
     pub async fn drop_all(&self) -> Result<()> {
@@ -238,11 +279,27 @@ impl WarpService {
             .acquire()
             .await
             .map_err(|_| anyhow::anyhow!("WARP 服务已关闭"))?;
+        let existing = self.all().await;
+        let results = futures::future::join_all(
+            existing
+                .iter()
+                .map(|account| unregister(&self.client, account)),
+        )
+        .await;
+        let failed: HashSet<_> = existing
+            .iter()
+            .zip(results)
+            .filter_map(|(account, result)| {
+                if let Err(error) = result {
+                    tracing::warn!("清理 WARP 账号 {} 失败: {error}", account.slot);
+                    Some(account.slot)
+                } else {
+                    None
+                }
+            })
+            .collect();
         let mut accounts = self.accounts.lock().await;
-        for a in accounts.iter() {
-            unregister(&self.client, a).await;
-        }
-        accounts.clear();
+        accounts.retain(|account| failed.contains(&account.slot));
         self.save(&accounts).await
     }
 
@@ -538,18 +595,26 @@ impl WarpService {
     }
 }
 
-async fn unregister(client: &reqwest::Client, a: &WarpAccount) {
-    if a.id.is_empty() || a.token.is_empty() {
-        return;
+async fn unregister(client: &reqwest::Client, account: &WarpAccount) -> Result<()> {
+    if account.id.is_empty() || account.token.is_empty() {
+        return Ok(());
     }
-    let _ = client
+    let response = client
         .delete(format!(
             "https://api.cloudflareclient.com/{WARP_API_VER}/reg/{}",
-            a.id
+            account.id
         ))
-        .bearer_auth(&a.token)
+        .bearer_auth(&account.token)
         .send()
-        .await;
+        .await?;
+    if matches!(
+        response.status(),
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::GONE
+    ) {
+        return Ok(());
+    }
+    response.error_for_status()?;
+    Ok(())
 }
 
 async fn run_warp(ns: &Netns, command: &[String], private_key: &str) -> Result<()> {
@@ -586,3 +651,7 @@ fn proc_uptime() -> i64 {
         .map(|v| v as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "warp_runtime_test.rs"]
+mod tests;

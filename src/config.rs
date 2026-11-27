@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{fs, net::IpAddr, path::Path};
 
@@ -146,7 +146,10 @@ impl WebSettings {
     }
 
     pub fn listen(&self) -> String {
-        format!("{}:{}", self.listen_addr, self.port)
+        match self.listen_addr.parse::<IpAddr>() {
+            Ok(IpAddr::V6(ip)) => format!("[{ip}]:{}", self.port),
+            _ => format!("{}:{}", self.listen_addr, self.port),
+        }
     }
 
     pub fn residential_only(&self) -> bool {
@@ -194,7 +197,8 @@ pub fn normalize_listen_addr(s: &str) -> Result<String> {
 pub fn load_settings(dir: &Path, port: u16, explicit: bool) -> Result<WebSettings> {
     let path = dir.join("settings.json");
     let mut s = match fs::read(&path) {
-        Ok(b) => serde_json::from_slice::<WebSettings>(&b).unwrap_or_default(),
+        Ok(b) => serde_json::from_slice::<WebSettings>(&b)
+            .context("settings.json 损坏，拒绝静默重置配置")?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => WebSettings::default(),
         Err(e) => return Err(e.into()),
     };
@@ -211,3 +215,7 @@ pub fn save_settings(dir: &Path, settings: &WebSettings) -> Result<()> {
     let data = serde_json::to_vec_pretty(settings)?;
     crate::util::atomic_write(dir.join("settings.json"), &data, 0o600)
 }
+
+#[cfg(test)]
+#[path = "config_test.rs"]
+mod tests;

@@ -274,6 +274,24 @@ fn checksum_list_and_file_hashing_are_compatible() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn self_update_binary_smoke_checks_version_and_exit_status() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temporary = tempfile::tempdir()?;
+    let binary = temporary.path().join("fanout-rust");
+    fs::write(&binary, "#!/bin/sh\necho 'fanout-rust v1.2.3'\n")?;
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))?;
+    verify_self_binary(&binary, "1.2.3")?;
+    assert!(verify_self_binary(&binary, "9.9.9").is_err());
+
+    fs::write(&binary, "#!/bin/sh\nexit 1\n")?;
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))?;
+    assert!(verify_self_binary(&binary, "1.2.3").is_err());
+    Ok(())
+}
+
 #[test]
 fn binary_replacement_succeeds_and_rolls_back_a_failed_reload() -> Result<()> {
     let temporary = tempfile::tempdir()?;

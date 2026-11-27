@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use csv::ReaderBuilder;
+use futures::StreamExt;
 use ipnet::Ipv4Net;
 use rand::Rng;
 use reqwest::{header::HeaderValue, Client, StatusCode};
@@ -16,6 +17,7 @@ const VPNGATE_API: &str = "https://www.vpngate.net/api/iphone/";
 const VPNGATE_MIRROR: &str = "https://p.xy.kg/vpngate";
 const MIRROR_KEY: &str = "8rhIFzFKRJMFAe-xP5OQPclDEvSjKlHo";
 const VPNGATE_OWN_NET: &str = "219.100.37.0/24";
+const NODE_LIST_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn mirror_url() -> String {
     std::env::var("FANOUT_VPNGATE_MIRROR")
@@ -76,21 +78,35 @@ pub async fn fetch_nodes_from(
         builder = builder.timeout(timeout);
     }
     let client = builder
-        .user_agent("fanout-rust/0.0.17")
+        .user_agent(concat!("fanout-rust/", env!("CARGO_PKG_VERSION")))
         .build()
         .context("拉取节点列表失败: 创建 HTTP 客户端失败")?;
     let mut req = client.get(url);
     if !key.is_empty() {
         req = req.header("X-Fanout-Key", HeaderValue::from_str(key)?);
     }
-    let resp = req.send().await.context("拉取节点列表失败")?;
+    let mut resp = req.send().await.context("拉取节点列表失败")?;
     if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(2)
+            .clamp(1, 60);
+        tokio::time::sleep(Duration::from_secs(retry_after)).await;
         return fetch_nodes_from_curl(url, key, timeout, score_mode, None).await;
     }
     if resp.status() != StatusCode::OK {
         anyhow::bail!("拉取节点列表失败: HTTP {}", resp.status().as_u16());
     }
-    let raw = resp.bytes().await.context("读取节点列表失败")?;
+    let mut raw = Vec::new();
+    while let Some(chunk) = resp.chunk().await.context("读取节点列表失败")? {
+        if raw.len().saturating_add(chunk.len()) > NODE_LIST_MAX_BYTES {
+            anyhow::bail!("节点列表超过 {NODE_LIST_MAX_BYTES} 字节上限");
+        }
+        raw.extend_from_slice(&chunk);
+    }
     parse_node_csv(&String::from_utf8_lossy(&raw), score_mode)
 }
 

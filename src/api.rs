@@ -162,7 +162,7 @@ pub async fn swap(State(state): State<Arc<AppState>>, Query(q): Query<SlotQuery>
 }
 
 #[derive(Deserialize)]
-pub struct CredQuery {
+pub struct CredReq {
     pub slot: usize,
     #[serde(default)]
     pub user: String,
@@ -170,7 +170,7 @@ pub struct CredQuery {
     pub pass: String,
 }
 
-pub async fn cred(State(state): State<Arc<AppState>>, Query(q): Query<CredQuery>) -> Response {
+pub async fn cred(State(state): State<Arc<AppState>>, Json(q): Json<CredReq>) -> Response {
     let m = &state.manager;
     match m.set_cred(q.slot, q.user, q.pass).await {
         Ok(c) => Json(json!({"user": c.user, "pass": c.pass})).into_response(),
@@ -393,7 +393,17 @@ pub async fn pool_cred(
         )
         .await
     {
-        Ok(c) => Json(json!({"user": c.user, "pass": c.pass})).into_response(),
+        Ok(c) => {
+            if let Some(panel) = state.manager.panel() {
+                if let Err(err) = panel.on_tunnels_changed().await {
+                    return error(
+                        StatusCode::BAD_GATEWAY,
+                        format!("组口令已更新，但同步节点链接后端失败：{err}"),
+                    );
+                }
+            }
+            Json(json!({"user": c.user, "pass": c.pass})).into_response()
+        }
         Err(e) => error(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
@@ -583,12 +593,38 @@ pub async fn settings(
     if let Some(Json(req)) = body {
         let old = state.manager.settings().await;
         let mut next = old.clone();
-        if let Some(p) = req.password.filter(|p| !p.is_empty()) {
-            if let Err(e) = state.auth.set_password(&p).await {
-                return error(StatusCode::BAD_REQUEST, e.to_string());
+        let normalized_base = match req.base_path.as_deref() {
+            Some(path) => match crate::auth::normalize_basepath(path) {
+                Ok(path) => Some(path),
+                Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
+            },
+            None => None,
+        };
+        if let Some(port) = req.port {
+            if port == 0 {
+                return error(StatusCode::BAD_REQUEST, "端口不能为 0");
+            }
+            next.port = port;
+        }
+        if let Some(addr) = req.listen_addr.as_deref() {
+            match crate::config::normalize_listen_addr(addr) {
+                Ok(addr) => next.listen_addr = addr,
+                Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
             }
         }
-        if let Some(path) = req.base_path {
+        restarting |= next.port != old.port || next.listen_addr != old.listen_addr;
+        if let Some(value) = req.residential_only {
+            next.residential_only = Some(value);
+        }
+        if let Some(conn) = req.conn {
+            next.conn = conn;
+        }
+        if let Some(password) = req.password.filter(|password| !password.is_empty()) {
+            if let Err(err) = state.auth.set_password(&password).await {
+                return error(StatusCode::BAD_REQUEST, err.to_string());
+            }
+        }
+        if let Some(path) = normalized_base {
             match crate::auth::save_basepath(&state.dir, &path) {
                 Ok(saved) => {
                     restarting |= saved != state.basepath;
@@ -596,22 +632,6 @@ pub async fn settings(
                 }
                 Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
             }
-        }
-        if let Some(p) = req.port {
-            next.port = p;
-        }
-        if let Some(a) = req.listen_addr {
-            match crate::config::normalize_listen_addr(&a) {
-                Ok(a) => next.listen_addr = a,
-                Err(e) => return error(StatusCode::BAD_REQUEST, e.to_string()),
-            }
-        }
-        restarting |= next.port != old.port || next.listen_addr != old.listen_addr;
-        if let Some(v) = req.residential_only {
-            next.residential_only = Some(v);
-        }
-        if let Some(c) = req.conn {
-            next.conn = c;
         }
         if let Err(e) = state.manager.update_settings(next).await {
             return internal(e);
@@ -753,13 +773,20 @@ pub async fn subscription(
             )
         }
     };
-    let bound_hosts: std::collections::HashSet<_> = state
+    let mut bound_hosts: std::collections::HashSet<_> = state
         .manager
         .exits()
         .await
         .iter()
         .map(|exit| crate::panel_native::sanitize_tag(&exit.host))
         .collect();
+    bound_hosts.extend(
+        state
+            .pools
+            .pools()
+            .iter()
+            .map(|pool| crate::panel_native::sanitize_tag(&pool.identity())),
+    );
     let bound_only = q.bound.as_deref() != Some("0");
     let ids: Vec<_> = inbounds
         .into_iter()

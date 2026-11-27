@@ -101,6 +101,32 @@ impl Drop for WorkDirLock {
     }
 }
 
+struct NetBaseLock {
+    _file: fs::File,
+}
+
+impl Drop for NetBaseLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn lock_netbase_assignment() -> Result<NetBaseLock> {
+    let file =
+        open_file("/run/lock/fanout-netbase.lock", 0o600, true).context("打开网段分配锁失败")?;
+    #[cfg(unix)]
+    {
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc != 0 {
+            bail!("等待网段分配锁失败");
+        }
+    }
+    Ok(NetBaseLock { _file: file })
+}
+
 pub fn lock_work_dir(dir: impl AsRef<Path>) -> Result<WorkDirLock> {
     let dir = dir.as_ref();
     let path = dir.join("lock");
@@ -122,6 +148,7 @@ pub fn lock_work_dir(dir: impl AsRef<Path>) -> Result<WorkDirLock> {
 
 /// Read a valid persisted base, or select and atomically persist a free one.
 pub fn load_or_pick_net_base(work_dir: &Path, abs: &Path) -> Result<u8> {
+    let _lock = lock_netbase_assignment()?;
     load_or_pick_net_base_with_used(work_dir, abs, host_used_net_bases())
 }
 

@@ -340,7 +340,7 @@ migrate_port_to_settings() {
 }
 
 do_update() {
-  local arch goarch tmp
+  local arch goarch tmp port bp had_bin=0 had_unit=0
   arch=$(uname -m)
   case "$arch" in
     x86_64) goarch=amd64 ;;
@@ -349,25 +349,57 @@ do_update() {
   esac
 
   echo -e "\n  当前 $("$BIN" -version 2>/dev/null || echo '-')  来源 ${REPO}"
-  tmp=$(mktemp -d)
-  echo "  正在下载最新版..."
-  if ! curl -fsSL "https://github.com/${REPO}/releases/latest/download/fanout-rust-linux-${goarch}.tar.gz" \
-       -o "$tmp/f.tar.gz"; then
+  tmp=$(mktemp -d) || return
+  echo "  正在下载最新版与校验和..."
+  if ! curl -fsSL "https://github.com/${REPO}/releases/latest/download/checksums.txt" -o "$tmp/checksums.txt" \
+     || ! curl -fsSL "https://github.com/${REPO}/releases/latest/download/fanout-rust-linux-${goarch}.tar.gz" -o "$tmp/f.tar.gz"; then
     echo -e "  ${R}下载失败${N}"; rm -rf "$tmp"; return
   fi
-  tar xzf "$tmp/f.tar.gz" -C "$tmp"
+  if ! (cd "$tmp" && grep -F "fanout-rust-linux-${goarch}.tar.gz" checksums.txt | sha256sum -c -); then
+    echo -e "  ${R}校验和失败，已放弃更新${N}"; rm -rf "$tmp"; return
+  fi
+  if ! tar xzf "$tmp/f.tar.gz" -C "$tmp" || ! "$tmp/fanout-rust" -version >/dev/null 2>&1; then
+    echo -e "  ${R}新版解包或自检失败，已放弃更新${N}"; rm -rf "$tmp"; return
+  fi
+
+  if [[ -f "$BIN" ]]; then
+    cp -p "$BIN" "$BIN.prev" || { echo -e "  ${R}备份旧版失败${N}"; rm -rf "$tmp"; return; }
+    had_bin=1
+  fi
+  if [[ -f "$UNIT" ]]; then
+    cp -p "$UNIT" "$tmp/unit.prev" || { echo -e "  ${R}备份服务文件失败${N}"; rm -rf "$tmp"; return; }
+    had_unit=1
+  fi
+
   svc_stop
-  install -m 755 "$tmp/fanout-rust" "$BIN"
+  if ! install -m 755 "$tmp/fanout-rust" "$BIN.new.$$" || ! mv -f "$BIN.new.$$" "$BIN"; then
+    echo -e "  ${R}替换二进制失败${N}"
+    [[ $had_bin == 1 ]] && cp -p "$BIN.prev" "$BIN"
+    rm -rf "$tmp"; svc_start; return
+  fi
   if [[ $INIT_SYS == systemd && -f "$tmp/fanout-rust.service" ]]; then
     sed "s#-web [0-9]* ##; s#-dir /var/lib/fanout#-dir ${WORK_DIR}#" \
       "$tmp/fanout-rust.service" > "$UNIT.new.$$"
     mv -f "$UNIT.new.$$" "$UNIT"
     svc_reload
   fi
-  # 菜单脚本一起换掉，否则这个脚本删掉的选项在已装机器上会一直留着。
-  # 必须先 install 到别处再 mv：正在跑的就是 /usr/local/bin/f，就地 truncate
-  # 同一个 inode 会让 bash 后面的读取错位，菜单跑到一半散架。
-  # Rust Release 当前不打包脚本，包里没有时从仓库 main 分支补齐。
+  migrate_port_to_settings
+  svc_start
+  port=$(web_port)
+  bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
+  echo "  等待 Web 服务就绪..."
+  if ! web_ready "$port" "$bp"; then
+    echo -e "  ${R}新版未就绪，正在回滚${N}"
+    [[ $had_bin == 1 ]] && cp -p "$BIN.prev" "$BIN"
+    if [[ $had_unit == 1 ]]; then
+      cp -p "$tmp/unit.prev" "$UNIT"
+      svc_reload
+    fi
+    svc_start
+    rm -rf "$tmp"
+    return
+  fi
+
   if [[ ! -f "$tmp/f.sh" ]]; then
     curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/f.sh" -o "$tmp/f.sh" || true
   fi
@@ -375,18 +407,6 @@ do_update() {
     install -m 755 "$tmp/f.sh" /usr/local/bin/f.new.$$ \
       && mv -f /usr/local/bin/f.new.$$ /usr/local/bin/f \
       && echo "  菜单脚本已同步，下次运行 f 生效"
-  fi
-  migrate_port_to_settings
-  svc_start
-  local port bp
-  port=$(web_port)
-  bp=$(cat "$WORK_DIR/basepath" 2>/dev/null)
-  echo "  等待 Web 服务就绪..."
-  if ! web_ready "$port" "$bp"; then
-    echo -e "  ${R}新版已安装，但等待 Web 就绪超时${N}"
-    svc_logs 20
-    rm -rf "$tmp"
-    return
   fi
   rm -rf "$tmp"
   echo -e "  ${G}已更新到 $("$BIN" -version 2>/dev/null)${N}"

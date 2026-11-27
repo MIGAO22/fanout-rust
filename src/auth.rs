@@ -220,8 +220,8 @@ pub async fn require_auth(
 pub fn load_basepath(dir: &Path) -> Result<(String, bool)> {
     let path = dir.join("basepath");
     match read_trim(&path) {
-        Some(p) if !p.is_empty() => Ok((p.trim_matches('/').to_string(), false)),
-        _ => {
+        Some(p) => Ok((p.trim_matches('/').to_string(), false)),
+        None => {
             let p = random_token(12);
             atomic_write(&path, p.as_bytes(), 0o600)?;
             Ok((p, true))
@@ -229,7 +229,7 @@ pub fn load_basepath(dir: &Path) -> Result<(String, bool)> {
     }
 }
 
-pub fn save_basepath(dir: &Path, raw: &str) -> Result<String> {
+pub fn normalize_basepath(raw: &str) -> Result<String> {
     let path = raw.trim().trim_matches('/');
     if path
         .chars()
@@ -237,10 +237,19 @@ pub fn save_basepath(dir: &Path, raw: &str) -> Result<String> {
     {
         anyhow::bail!("访问路径只能用字母、数字、- 和 _");
     }
-    atomic_write(dir.join("basepath"), path.as_bytes(), 0o600)?;
     Ok(path.to_string())
+}
+
+pub fn save_basepath(dir: &Path, raw: &str) -> Result<String> {
+    let path = normalize_basepath(raw)?;
+    atomic_write(dir.join("basepath"), path.as_bytes(), 0o600)?;
+    Ok(path)
 }
 
 pub fn parse_ip(s: &str) -> Option<IpAddr> {
     s.parse().ok()
 }
+
+#[cfg(test)]
+#[path = "auth_test.rs"]
+mod tests;

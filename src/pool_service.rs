@@ -29,14 +29,14 @@ use std::{
     net::{Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex as StdMutex, MutexGuard, OnceLock, Weak,
     },
     time::{Duration, Instant as StdInstant},
 };
 use tokio::{
     net::TcpListener,
-    sync::{mpsc, Mutex as AsyncMutex},
+    sync::{mpsc, Mutex as AsyncMutex, Semaphore},
     task::JoinHandle,
     time::{interval_at, sleep, timeout, Instant},
 };
@@ -48,6 +48,7 @@ const RAND_PORT_MIN: u16 = 20_000;
 const RAND_PORT_MAX: u16 = 60_000;
 const LISTEN_ATTEMPTS: usize = 4;
 const MEMBER_CACHE_TTL: Duration = Duration::from_millis(250);
+const POOL_MAX_CONNECTIONS: usize = 512;
 const EXTERNAL_XRAY_CONFIG: &str = "/usr/local/etc/xray/config.json";
 
 static POOL_PORTS: OnceLock<StdMutex<HashSet<u16>>> = OnceLock::new();
@@ -166,6 +167,8 @@ struct PoolRun {
     listener: StdMutex<Option<Arc<TcpListener>>>,
     port: u16,
     runtime: Arc<StdMutex<PoolRuntimeState>>,
+    connections: Arc<Semaphore>,
+    udp_cursor: AtomicUsize,
     shutdown: CancellationToken,
     task: StdMutex<Option<JoinHandle<()>>>,
 }
@@ -184,6 +187,8 @@ impl PoolRun {
                 &pool.mode,
                 pool.rr_step,
             ))),
+            connections: Arc::new(Semaphore::new(POOL_MAX_CONNECTIONS)),
+            udp_cursor: AtomicUsize::new(0),
             shutdown: CancellationToken::new(),
             task: StdMutex::new(None),
         }
@@ -196,8 +201,12 @@ impl PoolRun {
         allow_race: bool,
     ) -> crate::pools_logic::PoolChoice {
         let mut choice = lock_unpoisoned(&self.runtime).policy.pick(target, members);
-        if !allow_race {
+        if !allow_race && choice.concurrent {
             choice.concurrent = false;
+            if !choice.order.is_empty() {
+                let cursor = self.udp_cursor.fetch_add(1, Ordering::Relaxed);
+                choice.order.rotate_left(cursor % choice.order.len());
+            }
         }
         choice
     }
@@ -280,8 +289,17 @@ impl PoolService {
         manager: Arc<Manager>,
         mut store: PoolStore,
     ) -> Result<Self> {
+        let mut repaired = false;
         for pool in &mut store.pools {
             pool.normalize();
+            if pool.cred.user.is_empty() {
+                pool.cred = new_socks_cred();
+                repaired = true;
+            }
+            validate_cred(&pool.cred)?;
+        }
+        if repaired {
+            store.save(&dir)?;
         }
         let highest = store
             .pools
@@ -1145,8 +1163,15 @@ impl PoolService {
         let run = Arc::new(PoolRun::new(listener, &current));
         let id = current.id.clone();
         let listener = run.listener();
+        let connections = run.connections.clone();
         let shutdown = run.shutdown.clone();
-        let task = tokio::spawn(accept_loop(self.clone(), id.clone(), listener, shutdown));
+        let task = tokio::spawn(accept_loop(
+            self.clone(),
+            id.clone(),
+            listener,
+            connections,
+            shutdown,
+        ));
         *lock_unpoisoned(&run.task) = Some(task);
         lock_unpoisoned(&self.inner.state).runs.insert(id, run);
         Ok(())
@@ -1296,6 +1321,7 @@ async fn accept_loop(
     service: PoolService,
     id: String,
     listener: Arc<TcpListener>,
+    connections: Arc<Semaphore>,
     shutdown: CancellationToken,
 ) {
     loop {
@@ -1323,8 +1349,13 @@ async fn accept_loop(
                     drop(client);
                     continue;
                 };
+                let Ok(permit) = connections.clone().try_acquire_owned() else {
+                    drop(client);
+                    continue;
+                };
                 let dialer = service.dialer_for(&id);
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(error) = serve_socks(client, Some(&cred), &dialer).await {
                         debug!("出口组 SOCKS5 连接结束: {error}");
                     }

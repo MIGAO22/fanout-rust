@@ -308,6 +308,20 @@ async fn fetch_http_text(
     String::from_utf8(body).context("索引不是 UTF-8 文本")
 }
 
+fn verify_self_binary(path: &Path, version: &str) -> Result<()> {
+    let mut command = Command::new(path);
+    command.arg("-version");
+    let output = capture_output(command, Duration::from_secs(8)).context("新版自检失败")?;
+    if !output.status.success() {
+        bail!("新版自检退出失败: {}", format_exit_status(&output.status));
+    }
+    let text = combined_output(&output);
+    if !text.contains(version) {
+        bail!("新版版本不匹配（期望 {version}，实际 {}）", text.trim());
+    }
+    Ok(())
+}
+
 pub async fn apply_update() -> Result<()> {
     apply_update_with(|| async { fetch_latest_release().await }).await
 }
@@ -341,6 +355,18 @@ where
     let _guard = UPDATE_APPLY_LOCK.lock().await;
     let release = fetch().await?;
     let (asset_name, asset_url, sums_url) = select_update_assets(&release, &asset_arch())?;
+    if sums_url.is_empty() {
+        bail!("最新版缺少 checksums.txt，拒绝更新");
+    }
+    let version = release
+        .tag_name
+        .trim()
+        .strip_prefix('v')
+        .unwrap_or(release.tag_name.trim())
+        .to_string();
+    if version.is_empty() {
+        bail!("最新版标签为空，拒绝更新");
+    }
 
     let temporary = tempfile::Builder::new()
         .prefix("fanout-update-")
@@ -349,20 +375,14 @@ where
     download_file(&asset_url, &tar_path)
         .await
         .context("下载失败")?;
-    if !sums_url.is_empty() {
-        verify_checksum(&tar_path, &asset_name, &sums_url).await?;
-    }
+    verify_checksum(&tar_path, &asset_name, &sums_url).await?;
     let new_binary = temporary.path().join("fanout");
     extract_binary(&tar_path, UPDATE_BINARY_MEMBER, &new_binary).context("解包失败")?;
+    verify_self_binary(&new_binary, &version)?;
 
     let executable = env::current_exe().context("定位当前程序失败")?;
     let executable = fs::canonicalize(&executable).unwrap_or(executable);
-    let staged = sibling_path(&executable, ".new");
-    copy_file_mode(&new_binary, &staged, 0o755).context("写入新版本失败")?;
-    if let Err(error) = fs::rename(&staged, &executable) {
-        let _ = fs::remove_file(&staged);
-        return Err(error).context("替换二进制失败");
-    }
+    replace_binary_with(&executable, &new_binary, None)?;
 
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(800)).await;

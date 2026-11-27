@@ -83,7 +83,7 @@ async fn update_check_uses_injected_release_metadata() {
         "body": null,
         "html_url": null,
         "assets": [{
-            "name": "fanout-linux-amd64.tar.gz",
+            "name": "fanout-rust-linux-amd64.tar.gz",
             "browser_download_url": "https://example.invalid/fanout.tar.gz",
             "digest": null
         }]
@@ -95,6 +95,40 @@ async fn update_check_uses_injected_release_metadata() {
     assert!(release.html_url.is_empty());
     assert_eq!(release.assets.len(), 1);
     assert!(release.assets[0].digest.is_empty());
+}
+
+#[test]
+fn update_assets_match_release_workflow_names() {
+    let release = ReleaseInfo {
+        assets: vec![
+            ReleaseAsset {
+                name: "fanout-rust-linux-amd64.tar.gz".into(),
+                url: "https://example.invalid/amd64.tar.gz".into(),
+                ..ReleaseAsset::default()
+            },
+            ReleaseAsset {
+                name: "fanout-rust-linux-arm64.tar.gz".into(),
+                url: "https://example.invalid/arm64.tar.gz".into(),
+                ..ReleaseAsset::default()
+            },
+            ReleaseAsset {
+                name: "checksums.txt".into(),
+                url: "https://example.invalid/checksums.txt".into(),
+                ..ReleaseAsset::default()
+            },
+        ],
+        ..ReleaseInfo::default()
+    };
+    for (arch, url) in [
+        ("amd64", "https://example.invalid/amd64.tar.gz"),
+        ("arm64", "https://example.invalid/arm64.tar.gz"),
+    ] {
+        let (name, selected_url, sums_url) = select_update_assets(&release, arch).unwrap();
+        assert_eq!(name, format!("fanout-rust-linux-{arch}.tar.gz"));
+        assert_eq!(selected_url, url);
+        assert_eq!(sums_url, "https://example.invalid/checksums.txt");
+    }
+    assert!(select_update_assets(&release, "riscv64").is_err());
 }
 
 #[test]
@@ -215,14 +249,14 @@ fn checksum_list_and_file_hashing_are_compatible() -> Result<()> {
     let list = temporary.path().join("checksums.txt");
     fs::write(
         &list,
-        "abc123  fanout-linux-amd64.tar.gz\ndef456 *fanout-linux-arm64.tar.gz\n",
+        "abc123  fanout-rust-linux-amd64.tar.gz\ndef456 *fanout-rust-linux-arm64.tar.gz\n",
     )?;
     assert_eq!(
-        sha256_from_list(&list, "fanout-linux-amd64.tar.gz")?,
+        sha256_from_list(&list, "fanout-rust-linux-amd64.tar.gz")?,
         "abc123"
     );
     assert_eq!(
-        sha256_from_list(&list, "fanout-linux-arm64.tar.gz")?,
+        sha256_from_list(&list, "fanout-rust-linux-arm64.tar.gz")?,
         "def456"
     );
     assert!(sha256_from_list(&list, "missing.tar.gz").is_err());

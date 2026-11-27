@@ -311,15 +311,12 @@ pub async fn apply_update() -> Result<()> {
     apply_update_with(|| async { fetch_latest_release().await }).await
 }
 
-pub async fn apply_update_with<F, Fut>(fetch: F) -> Result<()>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<ReleaseInfo>>,
-{
-    let _guard = UPDATE_APPLY_LOCK.lock().await;
-    let release = fetch().await?;
-    let arch = asset_arch();
-    let asset_name = format!("fanout-linux-{arch}.tar.gz");
+fn update_asset_name(arch: &str) -> String {
+    format!("fanout-rust-linux-{arch}.tar.gz")
+}
+
+fn select_update_assets(release: &ReleaseInfo, arch: &str) -> Result<(String, String, String)> {
+    let asset_name = update_asset_name(arch);
     let mut asset_url = String::new();
     let mut sums_url = String::new();
     for asset in &release.assets {
@@ -332,6 +329,17 @@ where
     if asset_url.is_empty() {
         bail!("最新版里找不到适配 {arch} 的包");
     }
+    Ok((asset_name, asset_url, sums_url))
+}
+
+pub async fn apply_update_with<F, Fut>(fetch: F) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<ReleaseInfo>>,
+{
+    let _guard = UPDATE_APPLY_LOCK.lock().await;
+    let release = fetch().await?;
+    let (asset_name, asset_url, sums_url) = select_update_assets(&release, &asset_arch())?;
 
     let temporary = tempfile::Builder::new()
         .prefix("fanout-update-")

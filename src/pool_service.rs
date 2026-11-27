@@ -1022,14 +1022,14 @@ impl PoolService {
     }
 
     async fn retire_member(&self, host: &str) {
-        let Some(tunnel) = self
-            .inner
-            .manager
-            .tunnels()
-            .await
-            .into_iter()
-            .find(|tunnel| tunnel.host().as_str() == host)
-        else {
+        let mut found = None;
+        for tunnel in self.inner.manager.tunnels().await {
+            if tunnel.host().await == host {
+                found = Some(tunnel);
+                break;
+            }
+        }
+        let Some(tunnel) = found else {
             return;
         };
         let used_by_pool = host_in_pool(&self.pools(), host);

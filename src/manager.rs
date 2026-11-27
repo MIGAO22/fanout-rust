@@ -184,7 +184,7 @@ pub struct Manager {
     factory: Arc<dyn TunnelFactory>,
     pub tunnels: Arc<Mutex<HashMap<usize, Arc<Tunnel>>>>,
     allocate: Arc<Mutex<()>>,
-    closing: AtomicBool,
+    closing: Arc<AtomicBool>,
     panel: std::sync::OnceLock<Arc<dyn Panel>>,
 }
 
@@ -205,7 +205,7 @@ impl Manager {
             factory,
             tunnels: Arc::new(Mutex::new(HashMap::new())),
             allocate: Arc::new(Mutex::new(())),
-            closing: AtomicBool::new(false),
+            closing: Arc::new(AtomicBool::new(false)),
             panel: std::sync::OnceLock::new(),
         })
     }

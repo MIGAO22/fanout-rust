@@ -2101,11 +2101,12 @@ impl Native {
             }
             if let Some(blob) = previous_config {
                 util::atomic_write(&config_path, &blob, 0o600)?;
-                let old_empty = serde_json::from_slice::<Value>(&blob)
-                    .ok()
-                    .and_then(|value| value.get("inbounds").cloned())
-                    .and_then(Value::as_array)
-                    .is_some_and(Vec::is_empty);
+                let old_empty = serde_json::from_slice::<Value>(&blob).map_or(false, |value| {
+                    value
+                        .get("inbounds")
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty)
+                });
                 let proc = Arc::clone(&self.inner.proc);
                 let rollback: RestartAction = Arc::new(move || {
                     let proc = Arc::clone(&proc);

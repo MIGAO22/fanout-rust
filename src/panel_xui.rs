@@ -893,6 +893,7 @@ impl XUI {
         else {
             return Ok(());
         };
+        let runtime = self.runtime().await;
         if runtime_has_target(&runtime, &bound_to) {
             return self.bind_runtime(&ib.tag, &bound_to).await;
         }

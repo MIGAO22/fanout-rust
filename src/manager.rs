@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use chrono::Utc;
 use std::{
     collections::{HashMap, HashSet},

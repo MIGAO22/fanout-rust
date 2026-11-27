@@ -198,3 +198,56 @@ async fn queued_bring_up_keeps_its_own_generation() {
     assert_eq!(runtime.starts.load(Ordering::SeqCst), 2);
     assert_eq!(tunnel.status().await, "up");
 }
+
+#[tokio::test]
+async fn failed_status_records_timeout_origin_and_recovery_clears_it() {
+    let runtime = Arc::new(MockRuntime::new(new_socks_cred(), false));
+    let tunnel = Tunnel::new(1, 30_001, new_socks_cred(), node("node-1"), runtime);
+    assert!(tunnel.failed_since().await.is_none());
+
+    tunnel
+        .set_status("failed", "openvpn 退出: exit status 1")
+        .await;
+    let first_failure = tunnel.failed_since().await.unwrap();
+    tunnel
+        .set_status("failed", "openvpn 退出: exit status 1")
+        .await;
+    assert_eq!(tunnel.failed_since().await, Some(first_failure));
+
+    tunnel.set_status("starting", "正在换节点重连").await;
+    assert!(tunnel.failed_since().await.is_none());
+    tunnel
+        .set_status("failed", "openvpn 退出: exit status 1")
+        .await;
+    tunnel.set_up("203.0.113.10".into()).await;
+    assert!(tunnel.failed_since().await.is_none());
+}
+
+#[test]
+fn failed_exit_retry_requires_warp_failure_and_elapsed_timeout() {
+    let timeout = Duration::from_secs(60);
+    let fresh = std::time::Instant::now();
+    let expired = fresh - Duration::from_secs(61);
+
+    assert!(!failed_exit_retry_due("failed", true, None, timeout));
+    assert!(!failed_exit_retry_due("failed", true, Some(fresh), timeout));
+    assert!(failed_exit_retry_due(
+        "failed",
+        true,
+        Some(expired),
+        timeout
+    ));
+    assert!(!failed_exit_retry_due(
+        "failed",
+        false,
+        Some(expired),
+        timeout
+    ));
+    assert!(!failed_exit_retry_due(
+        "starting",
+        true,
+        Some(expired),
+        timeout
+    ));
+    assert!(!failed_exit_retry_due("up", true, Some(expired), timeout));
+}

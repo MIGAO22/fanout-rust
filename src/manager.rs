@@ -33,6 +33,7 @@ pub struct TunnelInner {
     pub since: chrono::DateTime<Utc>,
     pub prev_host: Option<String>,
     pub avoid: Vec<String>,
+    pub failed_since: Option<Instant>,
 }
 
 pub struct Tunnel {
@@ -66,6 +67,7 @@ impl Tunnel {
                 since: Utc::now(),
                 prev_host: None,
                 avoid: Vec::new(),
+                failed_since: None,
             }),
             generation: AtomicU64::new(0),
             run_lock: Mutex::new(()),
@@ -135,6 +137,11 @@ impl Tunnel {
         let mut i = self.inner.lock().await;
         i.status = status.into();
         i.err = one_line(err, 500);
+        i.failed_since = if status == "failed" {
+            Some(i.failed_since.unwrap_or_else(Instant::now))
+        } else {
+            None
+        };
         if status == "up" {
             i.since = Utc::now();
         }
@@ -146,6 +153,7 @@ impl Tunnel {
         i.exit_ip = ip;
         i.err.clear();
         i.avoid.clear();
+        i.failed_since = None;
         i.since = Utc::now();
     }
 
@@ -163,6 +171,10 @@ impl Tunnel {
 
     pub async fn exit_ip(&self) -> String {
         self.inner.lock().await.exit_ip.clone()
+    }
+
+    pub async fn failed_since(&self) -> Option<Instant> {
+        self.inner.lock().await.failed_since
     }
 }
 
@@ -466,15 +478,16 @@ impl Manager {
         });
     }
 
-    pub async fn replace_warp_failed(
+    pub async fn replace_failed(
         &self,
         t: Arc<Tunnel>,
         old_host: String,
+        reason: String,
         warp: Arc<WarpService>,
         pools: Arc<PoolService>,
     ) {
         let generation = t.bump_generation();
-        t.set_status("starting", "WARP 握手超时，正在清除并更换出口")
+        t.set_status("starting", &format!("{reason}，正在清除并更换出口"))
             .await;
         {
             let mut i = t.inner.lock().await;
@@ -491,14 +504,15 @@ impl Manager {
             .find(|node| node.hostname != old_host)
         {
             tracing::info!(
-                "隧道 {} WARP 超时，换节点 {} -> {}",
+                "隧道 {} {}，换节点 {} -> {}",
                 t.slot,
+                reason,
                 old_host,
                 next.hostname
             );
             t.set_node(next).await;
         } else {
-            tracing::warn!("隧道 {} WARP 超时，但没有其它候选节点", t.slot);
+            tracing::warn!("隧道 {} {}，但没有其它候选节点", t.slot, reason);
         }
         self.persist().await.ok();
         let m = self.clone();
@@ -924,14 +938,35 @@ impl Manager {
             let warp_enabled = s.warp().enabled;
             let tunnels = self.tunnels().await;
             let active_slots: HashSet<_> = tunnels.iter().map(|tunnel| tunnel.slot).collect();
+            fails.retain(|slot, _| active_slots.contains(slot));
+            warp_fail_since.retain(|slot, _| active_slots.contains(slot));
             if let Err(error) = warp.prune(&active_slots).await {
                 tracing::warn!("清理停止槽位的 WARP 注册失败: {error}");
             }
+            let warp_timeout =
+                Duration::from_secs(s.conn.warp_handshake_timeout.saturating_mul(60));
             let sem = Arc::new(Semaphore::new(8));
             let mut tasks = Vec::new();
+            let mut down = Vec::new();
             for t in tunnels {
-                if t.status().await != "up" {
+                let state = t.state().await;
+                if state.status != "up" {
                     warp_fail_since.remove(&t.slot);
+                    if failed_exit_retry_due(
+                        &state.status,
+                        warp_enabled,
+                        t.failed_since().await,
+                        warp_timeout,
+                    ) {
+                        down.push((
+                            t,
+                            format!(
+                                "出口失败已超过 {} 分钟：{}",
+                                s.conn.warp_handshake_timeout, state.err
+                            ),
+                            true,
+                        ));
+                    }
                     continue;
                 }
                 let sem = sem.clone();
@@ -969,16 +1004,13 @@ impl Manager {
                     }
                 }));
             }
-            let mut down = Vec::new();
             for task in tasks {
                 if let Ok((t, ok, why, certain, warp_pending)) = task.await {
                     if warp_pending {
                         let since = warp_fail_since.entry(t.slot).or_insert_with(Instant::now);
-                        let timeout =
-                            Duration::from_secs(s.conn.warp_handshake_timeout.saturating_mul(60));
-                        if since.elapsed() >= timeout {
+                        if since.elapsed() >= warp_timeout {
                             warp_fail_since.remove(&t.slot);
-                            down.push((t, why, true));
+                            down.push((t, format!("WARP 握手超时（{why}）"), true));
                         }
                         continue;
                     }
@@ -999,7 +1031,7 @@ impl Manager {
                 tracing::info!("隧道 {} 已掉线：{}", t.slot, why);
                 let old = t.host().await;
                 if warp_timeout {
-                    self.replace_warp_failed(t, old, warp.clone(), pools.clone())
+                    self.replace_failed(t, old, why, warp.clone(), pools.clone())
                         .await;
                 } else {
                     self.reconnect(t, old).await;
@@ -1021,6 +1053,17 @@ impl Manager {
             let _ = panel.close().await;
         }
     }
+}
+
+fn failed_exit_retry_due(
+    status: &str,
+    warp_enabled: bool,
+    failed_since: Option<Instant>,
+    timeout: Duration,
+) -> bool {
+    warp_enabled
+        && status == "failed"
+        && failed_since.is_some_and(|since| since.elapsed() >= timeout)
 }
 
 async fn p_resync(m: &Manager, t: &Arc<Tunnel>) -> Result<()> {

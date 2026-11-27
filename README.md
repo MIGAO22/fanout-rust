@@ -2,7 +2,7 @@
 
 [fanout](https://github.com/MIGAO22/fanout) 的 Rust 全量重构版：把 VPN Gate 的公共 OpenVPN 节点转换成本地 SOCKS5 出口，并可选择叠加 Cloudflare WARP。前端、工作目录和主要操作方式与 Go 版保持兼容。
 
-稳定版：[v1.0.2](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.0.2)
+稳定版：[v1.0.3](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.0.3)
 
 历史测试版：[Releases](https://github.com/MIGAO22/fanout-rust/releases)
 

@@ -344,25 +344,26 @@ migrate_port_to_settings() {
 }
 
 do_update() {
-  local arch goarch tmp port bp had_bin=0 had_unit=0 expected_version running_version old_pid new_pid
+  local arch goarch asset tmp port bp had_bin=0 had_unit=0 expected_version running_version old_pid new_pid
   arch=$(uname -m)
   case "$arch" in
     x86_64) goarch=amd64 ;;
     aarch64|arm64) goarch=arm64 ;;
     *) echo -e "  ${R}不支持的架构 ${arch}${N}"; return ;;
   esac
+  asset="fanout-rust-linux-${goarch}.tar.gz"
 
   echo -e "\n  当前 $("$BIN" -version 2>/dev/null || echo '-')  来源 ${REPO}"
   tmp=$(mktemp -d) || return
   echo "  正在下载最新版与校验和..."
   if ! curl -fsSL "https://github.com/${REPO}/releases/latest/download/checksums.txt" -o "$tmp/checksums.txt" \
-     || ! curl -fsSL "https://github.com/${REPO}/releases/latest/download/fanout-rust-linux-${goarch}.tar.gz" -o "$tmp/f.tar.gz"; then
+     || ! curl -fsSL "https://github.com/${REPO}/releases/latest/download/${asset}" -o "$tmp/$asset"; then
     echo -e "  ${R}下载失败${N}"; rm -rf "$tmp"; return
   fi
-  if ! (cd "$tmp" && grep -F "fanout-rust-linux-${goarch}.tar.gz" checksums.txt | sha256sum -c -); then
+  if ! (cd "$tmp" && grep -F "$asset" checksums.txt | sha256sum -c -); then
     echo -e "  ${R}校验和失败，已放弃更新${N}"; rm -rf "$tmp"; return
   fi
-  if ! tar xzf "$tmp/f.tar.gz" -C "$tmp" || ! "$tmp/fanout-rust" -version >/dev/null 2>&1; then
+  if ! tar xzf "$tmp/$asset" -C "$tmp" || ! "$tmp/fanout-rust" -version >/dev/null 2>&1; then
     echo -e "  ${R}新版解包或自检失败，已放弃更新${N}"; rm -rf "$tmp"; return
   fi
   expected_version=$("$tmp/fanout-rust" -version 2>/dev/null || true)

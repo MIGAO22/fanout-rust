@@ -288,11 +288,13 @@ impl PoolRun {
         }
     }
 
-    fn stable_acquire_lease(&self, members: &[PoolMember]) -> Option<StableLease> {
+    fn stable_acquire_lease(&self, target: &str, members: &[PoolMember]) -> Option<StableLease> {
         if self.closing.load(Ordering::Acquire) {
             return None;
         }
-        lock_unpoisoned(&self.runtime).stable.acquire_lease(members)
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .acquire_lease(target, members)
     }
 
     fn stable_release_lease(&self, lease: &StableLease) {
@@ -353,10 +355,13 @@ impl PoolRun {
             .commit(candidate, members, Instant::now())
     }
 
-    fn stable_note_dial_success(&self, host: &str, latency: Duration) {
-        lock_unpoisoned(&self.runtime)
-            .stable
-            .note_dial_success(host, latency, Instant::now());
+    fn stable_note_dial_success(&self, target: &str, host: &str, latency: Duration) {
+        lock_unpoisoned(&self.runtime).stable.note_dial_success(
+            target,
+            host,
+            latency,
+            Instant::now(),
+        );
     }
 
     fn stable_note_dial_failure(&self, host: &str, path_failure: bool) {
@@ -926,7 +931,7 @@ impl PoolService {
         let selected = {
             let _switch = run.stable_switch.lock().await;
             run.stable_reconcile(&policy_members);
-            if let Some(lease) = run.stable_acquire_lease(&policy_members) {
+            if let Some(lease) = run.stable_acquire_lease(target, &policy_members) {
                 (lease.host.clone(), lease)
             } else {
                 let membership_epoch = run.membership_epoch();
@@ -944,7 +949,7 @@ impl PoolService {
                         continue;
                     };
                     if !run.stable_begin_transition(host.clone()) {
-                        if let Some(lease) = run.stable_acquire_lease(&policy_members) {
+                        if let Some(lease) = run.stable_acquire_lease(target, &policy_members) {
                             switched = Some((lease.host.clone(), lease));
                             break;
                         }
@@ -969,7 +974,9 @@ impl PoolService {
                                 run.stable_mark_verified(&host, latency);
                             }
                             if run.stable_commit(&host, &policy_members) {
-                                if let Some(lease) = run.stable_acquire_lease(&policy_members) {
+                                if let Some(lease) =
+                                    run.stable_acquire_lease(target, &policy_members)
+                                {
                                     switched = Some((lease.host.clone(), lease));
                                     break;
                                 }
@@ -1007,7 +1014,7 @@ impl PoolService {
         match outcome.result {
             Ok(socket) => {
                 run.note_success(target, &host, outcome.elapsed);
-                run.stable_note_dial_success(&host, outcome.elapsed);
+                run.stable_note_dial_success(target, &host, outcome.elapsed);
                 Ok((socket, host))
             }
             Err(error) => {

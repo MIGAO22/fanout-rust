@@ -695,6 +695,7 @@ pub struct StableState {
     transition: Option<StableTransition>,
     rollback_until: Option<Instant>,
     health: HashMap<String, StableMemberHealth>,
+    affinity: HashMap<String, String>,
 }
 
 fn stable_ewma(previous: Duration, sample: Duration) -> Duration {
@@ -734,6 +735,8 @@ impl StableState {
         let hosts: HashSet<&str> = members.iter().map(|member| member.host.as_str()).collect();
         self.health.retain(|host, _| hosts.contains(host.as_str()));
         self.inflight.retain(|host| hosts.contains(host.as_str()));
+        self.affinity
+            .retain(|_, host| hosts.contains(host.as_str()));
         if self
             .active
             .as_deref()
@@ -783,14 +786,17 @@ impl StableState {
         };
     }
 
-    pub fn acquire_lease(&mut self, members: &[PoolMember]) -> Option<StableLease> {
-        let host = self.active.as_deref()?;
-        if !self.usable(members, host) {
+    pub fn acquire_lease(&mut self, target: &str, members: &[PoolMember]) -> Option<StableLease> {
+        let affinity = self.affinity.get(target).cloned();
+        let host = affinity
+            .filter(|host| self.usable(members, host))
+            .or_else(|| self.active.clone())?;
+        if !self.usable(members, &host) {
             return None;
         }
-        *self.leases.entry(host.to_string()).or_default() += 1;
+        *self.leases.entry(host.clone()).or_default() += 1;
         Some(StableLease {
-            host: host.to_string(),
+            host,
             route_version: self.route_version,
         })
     }
@@ -884,10 +890,14 @@ impl StableState {
         })
     }
 
-    pub fn note_dial_success(&mut self, host: &str, latency: Duration, now: Instant) {
+    pub fn note_dial_success(&mut self, target: &str, host: &str, latency: Duration, now: Instant) {
         if self.active.as_deref() != Some(host) {
             return;
         }
+        if !self.affinity.contains_key(target) && self.affinity.len() >= POOL_AFFINITY_MAX {
+            self.affinity.clear();
+        }
+        self.affinity.insert(target.to_string(), host.to_string());
         let health = self.health.entry(host.to_string()).or_default();
         health.health = StableHealth::Healthy;
         health.successes = health.successes.max(POOL_STABLE_SUCCESSES);
@@ -909,6 +919,7 @@ impl StableState {
         health.successes = 0;
         health.failures = health.failures.saturating_add(1);
         health.strong_verified_at = None;
+        self.affinity.retain(|_, bound| bound != host);
         health.health = if health.failures >= POOL_STABLE_FAILURES {
             StableHealth::Failed
         } else {

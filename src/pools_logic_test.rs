@@ -1066,13 +1066,14 @@ fn stable_mode_requires_verified_switch_and_preserves_inflight_leases() {
     ];
     let mut state = StableState::default();
     state.reconcile(&members, now);
-    assert!(state.acquire_lease(&members).is_none());
+    assert!(state.acquire_lease("target", &members).is_none());
 
     assert!(state.begin_transition("a".into(), now));
     state.mark_verified("a", Duration::from_millis(50), now);
     assert!(state.commit("a", &members, now));
-    let old_lease = state.acquire_lease(&members).unwrap();
+    let old_lease = state.acquire_lease("site", &members).unwrap();
     assert_eq!(old_lease.host, "a");
+    state.note_dial_success("site", "a", Duration::from_millis(50), now);
 
     assert!(state.begin_probe("b", now));
     state.finish_probe("b", true, Duration::from_millis(40), now);
@@ -1083,11 +1084,14 @@ fn stable_mode_requires_verified_switch_and_preserves_inflight_leases() {
     assert!(state.begin_transition("b".into(), now));
     assert!(state.commit("b", &members, now));
 
-    let new_lease = state.acquire_lease(&members).unwrap();
+    let new_lease = state.acquire_lease("new-target", &members).unwrap();
     assert_eq!(new_lease.host, "b");
+    let sticky_lease = state.acquire_lease("site", &members).unwrap();
+    assert_eq!(sticky_lease.host, "a");
     assert!(state.pinned("a", now));
     state.release_lease(&old_lease);
     state.release_lease(&new_lease);
+    state.release_lease(&sticky_lease);
     assert!(state.pinned("a", now));
 
     state.note_dial_failure("b", true, now);
@@ -1111,7 +1115,7 @@ fn stable_membership_changes_keep_inflight_route_leases() {
     assert!(state.begin_transition("a".into(), now));
     state.mark_verified("a", Duration::ZERO, now);
     assert!(state.commit("a", &members, now));
-    let lease = state.acquire_lease(&members).unwrap();
+    let lease = state.acquire_lease("target", &members).unwrap();
 
     state.reconcile(&members[..1], now);
     assert!(state.pinned("a", now));

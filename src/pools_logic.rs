@@ -5,7 +5,8 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 pub use crate::models::{POOL_DEFAULT_RR_STEP, POOL_MAX_HOSTS, POOL_MODES};
 

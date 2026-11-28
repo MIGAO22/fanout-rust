@@ -928,7 +928,7 @@ impl PoolService {
             let _switch = run.stable_switch.lock().await;
             run.stable_reconcile(&policy_members);
             if let Some(lease) = run.stable_acquire_lease(&policy_members) {
-                (lease.host, lease)
+                (lease.host.clone(), lease)
             } else {
                 let membership_epoch = run.membership_epoch();
                 let mut last_error = None;
@@ -946,7 +946,7 @@ impl PoolService {
                     };
                     if !run.stable_begin_transition(host.clone()) {
                         if let Some(lease) = run.stable_acquire_lease(&policy_members) {
-                            switched = Some((lease.host, lease));
+                            switched = Some((lease.host.clone(), lease));
                             break;
                         }
                         continue;
@@ -971,7 +971,7 @@ impl PoolService {
                             }
                             if run.stable_commit(&host, &policy_members) {
                                 if let Some(lease) = run.stable_acquire_lease(&policy_members) {
-                                    switched = Some((lease.host, lease));
+                                    switched = Some((lease.host.clone(), lease));
                                     break;
                                 }
                             }
@@ -1153,7 +1153,8 @@ impl PoolService {
                 tokio::spawn(async move {
                     if stable_mode {
                         let _permit = probe_limit.acquire_owned().await.ok();
-                        if let Some(service) = weak.upgrade() {
+                        if let Some(inner) = weak.upgrade() {
+                            let service = PoolService { inner };
                             let attempt = tokio::select! {
                                 biased;
                                 _ = shutdown.cancelled() => None,

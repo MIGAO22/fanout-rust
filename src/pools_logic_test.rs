@@ -1108,6 +1108,29 @@ fn stable_mode_requires_verified_switch_and_preserves_inflight_leases() {
 }
 
 #[test]
+fn stable_dial_success_smooths_faster_samples_without_underflow() {
+    let now = Instant::now();
+    let members = [up_member("a", Duration::ZERO)];
+    let mut state = StableState::default();
+    state.reconcile(&members, now);
+    assert!(state.begin_transition("a".into(), now));
+    state.mark_verified("a", Duration::from_millis(200), now);
+    assert!(state.commit("a", &members, now));
+
+    state.note_dial_success("site", "a", Duration::from_millis(200), now);
+    state.note_dial_success("site", "a", Duration::from_millis(50), now);
+    assert_eq!(
+        state.health.get("a").unwrap().latency,
+        Duration::from_millis(125)
+    );
+    state.note_dial_success("site", "a", Duration::from_millis(25), now);
+    assert_eq!(
+        state.health.get("a").unwrap().latency,
+        Duration::from_millis(75)
+    );
+}
+
+#[test]
 fn stable_membership_changes_keep_inflight_route_leases() {
     let now = Instant::now();
     let members = [

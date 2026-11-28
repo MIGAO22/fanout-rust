@@ -904,11 +904,7 @@ impl StableState {
         health.failures = 0;
         health.last_success = Some(now);
         health.retry_at = None;
-        health.latency = if health.latency.is_zero() {
-            latency
-        } else {
-            health.latency + (latency - health.latency) / 2
-        };
+        health.latency = stable_ewma(health.latency, latency);
     }
 
     pub fn note_dial_failure(&mut self, host: &str, path_failure: bool, now: Instant) {

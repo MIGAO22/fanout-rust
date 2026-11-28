@@ -22,7 +22,20 @@ jobs:
       - name: 类型检查
         run: cargo check --all-targets
       - name: 单元测试
-        run: cargo test --all -- --test-threads=1
+        run: |
+          set +e
+          cargo test --all -- --test-threads=1 --nocapture > /tmp/fanout-test.log 2>&1
+          code=$?
+          cat /tmp/fanout-test.log
+          if [ "$code" -ne 0 ]; then
+            {
+              echo '### 单元测试失败'
+              echo '```log'
+              cat /tmp/fanout-test.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$code"
       - name: 构建 amd64
         run: cargo build --release --target x86_64-unknown-linux-gnu
       - name: 交叉编译 arm64

@@ -553,9 +553,8 @@ impl PoolService {
             if let Some(run) = self.run_of(&pool.id) {
                 if routing_changed {
                     run.membership_changed();
-                } else {
-                    run.reconfigure(&pool.mode, pool.rr_step);
                 }
+                run.reconfigure(&pool.mode, pool.rr_step);
             }
         }
         self.ensure_listener(&pool).await?;

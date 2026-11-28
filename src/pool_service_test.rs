@@ -279,6 +279,46 @@ async fn stable_pool_persists_and_requires_an_active_before_serving() {
 }
 
 #[tokio::test]
+async fn changing_existing_pool_to_stable_reconfigures_runtime_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = test_manager(dir.path());
+    let service = PoolService::load(dir.path(), manager, PoolStore::new())
+        .await
+        .unwrap();
+    service
+        .set_pool(Pool {
+            name: "模式切换".into(),
+            mode: POOL_MODE_ROUND_ROBIN.into(),
+            hosts: vec!["missing-a".into(), "missing-b".into()],
+            rr_step: 5,
+            ..Pool::default()
+        })
+        .await
+        .unwrap();
+    let run = service.run_of("p1").unwrap();
+    assert_eq!(run.current_mode(), POOL_MODE_ROUND_ROBIN);
+
+    service
+        .set_pool(Pool {
+            id: "p1".into(),
+            name: "模式切换".into(),
+            mode: crate::pools_logic::POOL_MODE_STABLE.into(),
+            hosts: vec!["missing-a".into(), "missing-b".into()],
+            rr_step: 7,
+            ..Pool::default()
+        })
+        .await
+        .unwrap();
+    let run = service.run_of("p1").unwrap();
+    assert_eq!(run.current_mode(), crate::pools_logic::POOL_MODE_STABLE);
+    assert_eq!(run.step.load(std::sync::atomic::Ordering::Relaxed), 7);
+    assert!(lock_unpoisoned(&run.runtime)
+        .stable
+        .stable_probe_due(&up_member("missing-a"), Instant::now()));
+    service.close().await;
+}
+
+#[tokio::test]
 async fn runtime_selection_covers_affinity_cooldown_latency_and_udp_fallback() {
     let listener = TcpListener::bind(SocketAddr::from((LOOPBACK, 0)))
         .await

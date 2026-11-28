@@ -13,6 +13,21 @@ pub trait TunnelRuntime: Send + Sync {
     async fn probe_exit_ip(&self) -> Result<String>;
     fn dead_reason(&self) -> Option<String>;
     async fn healthy(&self) -> bool;
+    async fn local_ready(&self) -> Result<()> {
+        if self.healthy().await {
+            Ok(())
+        } else {
+            anyhow::bail!("隧道本地健康检查失败")
+        }
+    }
+    async fn verify_ready(&self, expected_ip: &str) -> Result<()> {
+        self.local_ready().await?;
+        let observed = self.probe_exit_ip().await?;
+        if observed != expected_ip {
+            anyhow::bail!("出口 IP 从 {expected_ip} 变成 {observed}");
+        }
+        Ok(())
+    }
     fn socks_dialer(&self) -> Arc<dyn SocksDialer>;
     async fn guard_transit(&self) -> Result<()> {
         Ok(())

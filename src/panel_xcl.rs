@@ -663,7 +663,7 @@ fn live_map(tunnels: &[TunnelState], pools: &[PoolView]) -> HashMap<String, bool
         live.insert(sanitize_tag(&tunnel.node.hostname), true);
     }
     for pool in egress_pools(pools) {
-        live.insert(sanitize_tag(&pool.identity), pool.up > 0);
+        live.insert(sanitize_tag(&pool.identity), pool.ready);
     }
     live
 }

@@ -2,7 +2,7 @@
 
 [fanout](https://github.com/MIGAO22/fanout) 的 Rust 全量重构版：把 VPN Gate 的公共 OpenVPN 节点转换成本地 SOCKS5 出口，并可选择叠加 Cloudflare WARP。前端、工作目录和主要操作方式与 Go 版保持兼容。
 
-稳定版：[v1.1.2](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.1.2)
+稳定版：[v1.2.0](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.2.0)
 
 历史测试版：[Releases](https://github.com/MIGAO22/fanout-rust/releases)
 
@@ -13,7 +13,7 @@
 - 自动拉取、评分和缓存 VPN Gate 节点；主接口限流时通过 curl 或在线出口兜底。
 - 健康检查、失败候选轮换、退避重连、节点超时替换和旧 WARP 账号清理。
 - 可选的 Cloudflare WARP 中转：注册、WireGuard 握手、分流路由和超时自动替换。
-- 出口组：单一出口、轮询出口、负载均衡、并发出口。
+- 出口组：单一出口、轮询出口、负载均衡、并发出口，以及带强预检和原子切换的稳定模式。
 - 出口组自动补位、首选国家、60% 国家配额、在线出口复用和全局 20 台上限。
 - 实时出口指标：探活延迟、抖动、丢包、SOCKS 吞吐、重连与失败时间线。
 - 智能选路：EWMA 质量评分、失败节点隔离、最短驻留、切换冷却和出口组自动策略。
@@ -48,7 +48,7 @@ PanelManager
 ```
 
 - `Manager` 负责出口生命周期、节点选择、重连和健康检查。
-- `PoolService` 负责出口组监听、四种选路策略、探测和自动补位。
+- `PoolService` 负责出口组监听、五种选路策略、稳定模式状态机、探测和自动补位。
 - `NodeHealthStore` 汇总探活、连接和 WARP 握手历史，为候选排序与隔离提供动态评分。
 - `ObservabilityStore` 保存有界指标与健康时间线，并渲染 Prometheus 文本。
 - `WarpService` 负责 Cloudflare 账号、注册限流、握手和分流；账号池模式额外管理租约、预热与审计。
@@ -180,6 +180,16 @@ http://服务器IP:8899/migao/
 | 轮询出口 | `roundrobin` | 每 N 个新目标切换一次出口 |
 | 负载均衡 | `latency` | 在延迟接近的最快出口之间轮换，避免单条过载 |
 | 并发出口 | `race` | 同时向多条出口拨号，使用最先成功的一条 |
+| 稳定模式 | `stable` | 当前成员粘滞，备选后台预检；切换前执行 TCP、UDP DNS、出口 IP、WARP/路由强验证，通过后原子切换 |
+
+稳定模式：
+
+- 新连接只使用当前 Active 成员；备选成员持续做轻量 TCP/UDP 预检，并定期完成出口 IP、WARP 和路由强预检。
+- 当前成员不可用时，按顺序复检备选；强预检结果仍新鲜时只做快速复检，否则重新执行完整强预检，任一检查失败都不切。
+- 切换提交在一个短临界区内完成，正在进行拨号的旧路由租约不会被中断。
+- 已建立的 TCP 连接和 UDP 会话继续使用原 socket，不迁移、不主动断开。
+- 新 Active 进入 30 秒观察期，确认失败时可回滚到仍健康的 previous；旧成员保留 10 分钟防止频繁来回切换。
+- 稳定模式显式占用选路策略，不会被“自动调整策略”覆盖；没有任何成员通过预检时 fail-closed，不回落母机直连。
 
 自动补位：
 

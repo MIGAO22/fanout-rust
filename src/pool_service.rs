@@ -5,7 +5,7 @@
 //! falls back to the host network: it only uses a selected tunnel's dialer.
 
 use crate::{
-    manager::Manager,
+    manager::{Manager, Tunnel},
     models::{Pool, PoolStore, PoolView, SocksCred, TunnelState},
     nodes::{new_socks_cred, node_supports_aead, validate_cred},
     panel_native::egress_tag,
@@ -14,9 +14,9 @@ use crate::{
         country_is_preferred, creation_room, fill_avoid, fill_candidates, fill_completion_note,
         fill_failure_reason, fill_slot, host_in_pool, load_pool_store, parse_pool_seq,
         pool_reuse_pick, pool_view, retire_slot, target_key, PoolFillState, PoolMember,
-        PoolRuntimeState, POOL_FILL_INTERVAL, POOL_FILL_SLOT_FLOOR, POOL_FILL_WAIT_UP,
-        POOL_MODE_BALANCE, POOL_MODE_ROUND_ROBIN, POOL_MODE_SINGLE, POOL_PROBE_INTERVAL,
-        POOL_PROBE_TARGET, POOL_TRY_TIMEOUT,
+        PoolRuntimeState, StableLease, POOL_FILL_INTERVAL, POOL_FILL_SLOT_FLOOR, POOL_FILL_WAIT_UP,
+        POOL_MODE_BALANCE, POOL_MODE_ROUND_ROBIN, POOL_MODE_SINGLE, POOL_MODE_STABLE,
+        POOL_PROBE_INTERVAL, POOL_PROBE_TARGET, POOL_TRY_TIMEOUT,
     },
     socks5::{serve_socks, DialNetwork, DialSocket, SocksDialer},
 };
@@ -30,7 +30,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex as StdMutex, MutexGuard, OnceLock, Weak,
     },
     time::{Duration, Instant as StdInstant},
@@ -92,6 +92,7 @@ pub struct PoolEgress {
     pub port: u16,
     pub cred: SocksCred,
     pub up: usize,
+    pub ready: bool,
 }
 
 /// A SOCKS5 dialer bound to one pool. Clones share the service and pool ID.
@@ -133,6 +134,7 @@ struct PoolServiceInner {
     manager: Arc<Manager>,
     state: StdMutex<ServiceState>,
     operations: AsyncMutex<()>,
+    probe_limit: Arc<Semaphore>,
     closed: AtomicBool,
     shutdown: CancellationToken,
     probe_task: StdMutex<Option<JoinHandle<()>>>,
@@ -167,7 +169,10 @@ impl Drop for PoolServiceInner {
 struct PoolRun {
     listener: StdMutex<Option<Arc<TcpListener>>>,
     port: u16,
-    step: usize,
+    step: AtomicUsize,
+    membership_epoch: AtomicU64,
+    stable_switch: AsyncMutex<()>,
+    closing: AtomicBool,
     runtime: Arc<StdMutex<PoolRuntimeState>>,
     connections: Arc<Semaphore>,
     udp_cursor: AtomicUsize,
@@ -185,7 +190,10 @@ impl PoolRun {
         Self {
             listener: StdMutex::new(Some(Arc::new(listener))),
             port,
-            step: pool.rr_step,
+            step: AtomicUsize::new(pool.rr_step),
+            membership_epoch: AtomicU64::new(0),
+            stable_switch: AsyncMutex::new(()),
+            closing: AtomicBool::new(false),
             runtime: Arc::new(StdMutex::new(PoolRuntimeState::new(
                 &pool.mode,
                 pool.rr_step,
@@ -204,7 +212,13 @@ impl PoolRun {
         allow_race: bool,
     ) -> crate::pools_logic::PoolChoice {
         let mode = self.current_mode();
-        self.choose_with_mode(target, members, allow_race, &mode, self.step)
+        self.choose_with_mode(
+            target,
+            members,
+            allow_race,
+            &mode,
+            self.step.load(Ordering::Relaxed),
+        )
     }
 
     fn choose_with_mode(
@@ -217,7 +231,7 @@ impl PoolRun {
     ) -> crate::pools_logic::PoolChoice {
         let mut runtime = lock_unpoisoned(&self.runtime);
         if runtime.policy.mode != mode {
-            runtime.policy.reconfigure(mode, step);
+            runtime.reconfigure(mode, step);
         }
         let mut choice = runtime.policy.pick(target, members);
         if !allow_race && choice.concurrent {
@@ -240,9 +254,17 @@ impl PoolRun {
     }
 
     fn reconfigure(&self, mode: &str, step: usize) {
-        lock_unpoisoned(&self.runtime)
-            .policy
-            .reconfigure(mode, step);
+        self.step.store(step, Ordering::Relaxed);
+        lock_unpoisoned(&self.runtime).reconfigure(mode, step);
+    }
+
+    fn membership_changed(&self) {
+        self.membership_epoch.fetch_add(1, Ordering::AcqRel);
+        lock_unpoisoned(&self.runtime).stable.reset();
+    }
+
+    fn membership_epoch(&self) -> u64 {
+        self.membership_epoch.load(Ordering::Acquire)
     }
 
     fn apply_target_state(&self, target: &str, members: &mut [PoolMember]) {
@@ -257,6 +279,104 @@ impl PoolRun {
         lock_unpoisoned(&self.runtime).note_failure(host, Utc::now());
     }
 
+    fn stable_reconcile(&self, members: &[PoolMember]) {
+        let mut runtime = lock_unpoisoned(&self.runtime);
+        let now = Instant::now();
+        runtime.stable.reconcile(members, now);
+        if runtime.stable.status(members, now).phase == "rollback" {
+            runtime.stable.rollback(members, now);
+        }
+    }
+
+    fn stable_acquire_lease(&self, members: &[PoolMember]) -> Option<StableLease> {
+        if self.closing.load(Ordering::Acquire) {
+            return None;
+        }
+        lock_unpoisoned(&self.runtime).stable.acquire_lease(members)
+    }
+
+    fn stable_release_lease(&self, lease: &StableLease) {
+        lock_unpoisoned(&self.runtime).stable.release_lease(lease);
+    }
+
+    fn stable_begin_probe(&self, host: &str) -> bool {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .begin_probe(host, Instant::now())
+    }
+
+    fn stable_finish_probe(&self, host: &str, ok: bool, latency: Duration) {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .finish_probe(host, ok, latency, Instant::now());
+    }
+
+    fn stable_mark_verified(&self, host: &str, latency: Duration) {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .mark_verified(host, latency, Instant::now());
+    }
+
+    fn stable_strong_fresh(&self, host: &str) -> bool {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .strong_fresh(host, Instant::now())
+    }
+
+    fn stable_strong_due(&self, host: &str) -> bool {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .strong_due(host, Instant::now())
+    }
+
+    fn stable_candidate(&self, members: &[PoolMember], verified_only: bool) -> Option<String> {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .candidate(members, verified_only)
+    }
+
+    fn stable_begin_transition(&self, candidate: String) -> bool {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .begin_transition(candidate, Instant::now())
+    }
+
+    fn stable_abort_transition(&self, members: &[PoolMember]) {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .abort_transition(members, Instant::now());
+    }
+
+    fn stable_commit(&self, candidate: &str, members: &[PoolMember]) -> bool {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .commit(candidate, members, Instant::now())
+    }
+
+    fn stable_note_dial_success(&self, host: &str, latency: Duration) {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .note_dial_success(host, latency, Instant::now());
+    }
+
+    fn stable_note_dial_failure(&self, host: &str, path_failure: bool) {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .note_dial_failure(host, path_failure, Instant::now());
+    }
+
+    fn stable_pinned(&self, host: &str) -> bool {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .pinned(host, Instant::now())
+    }
+
+    fn stable_status(&self, members: &[PoolMember]) -> crate::pools_logic::StableStatus {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .status(members, Instant::now())
+    }
+
     fn listener(&self) -> Arc<TcpListener> {
         lock_unpoisoned(&self.listener)
             .as_ref()
@@ -265,6 +385,7 @@ impl PoolRun {
     }
 
     fn shutdown(&self) -> Option<JoinHandle<()>> {
+        self.closing.store(true, Ordering::Release);
         self.shutdown.cancel();
         drop(lock_unpoisoned(&self.listener).take());
         lock_unpoisoned(&self.task).take()
@@ -276,6 +397,17 @@ impl PoolRun {
             let _ = task.await;
         }
         unnote_pool_port(self.port);
+    }
+}
+
+struct StableLeaseGuard {
+    run: Arc<PoolRun>,
+    lease: StableLease,
+}
+
+impl Drop for StableLeaseGuard {
+    fn drop(&mut self) {
+        self.run.stable_release_lease(&self.lease);
     }
 }
 
@@ -342,6 +474,7 @@ impl PoolService {
                 ..ServiceState::default()
             }),
             operations: AsyncMutex::new(()),
+            probe_limit: Arc::new(Semaphore::new(4)),
             closed: AtomicBool::new(false),
             shutdown: CancellationToken::new(),
             probe_task: StdMutex::new(None),
@@ -377,6 +510,12 @@ impl PoolService {
 
         let mut store = lock_unpoisoned(&self.inner.state).store.clone();
         let existing = store.get(&pool.id).is_some();
+        let routing_changed = if let Some(previous) = store.get(&pool.id) {
+            previous.hosts != pool.hosts
+                || canonical_pool_mode(&previous.mode) != canonical_pool_mode(&pool.mode)
+        } else {
+            false
+        };
         if let Some(index) = store.pools.iter().position(|item| item.id == pool.id) {
             pool.port = store.pools[index].port;
             pool.cred = store.pools[index].cred.clone();
@@ -398,8 +537,12 @@ impl PoolService {
             let mut state = lock_unpoisoned(&self.inner.state);
             state.store = store;
             state.member_cache.remove(&pool.id);
-            if existing {
-                if let Some(run) = state.runs.get(&pool.id) {
+        }
+        if existing {
+            if let Some(run) = self.run_of(&pool.id) {
+                if routing_changed {
+                    run.membership_changed();
+                } else {
                     run.reconfigure(&pool.mode, pool.rr_step);
                 }
             }
@@ -425,6 +568,7 @@ impl PoolService {
             let mut state = lock_unpoisoned(&self.inner.state);
             state.store = store;
             state.fill.drop_ledger(id);
+            state.member_cache.remove(id);
         }
         let run = lock_unpoisoned(&self.inner.state).runs.remove(id);
         if let Some(run) = run {
@@ -462,19 +606,36 @@ impl PoolService {
         }
         let mut store = lock_unpoisoned(&self.inner.state).store.clone();
         let mut changed = false;
+        let mut affected = Vec::new();
         for pool in &mut store.pools {
+            let mut pool_changed = false;
             for host in &mut pool.hosts {
                 if host == old_host {
                     *host = new_host.to_string();
                     changed = true;
+                    pool_changed = true;
                 }
+            }
+            if pool_changed {
+                affected.push(pool.id.clone());
             }
         }
         if !changed {
             return Ok(false);
         }
         store.save(&self.inner.dir)?;
-        lock_unpoisoned(&self.inner.state).store = store;
+        {
+            let mut state = lock_unpoisoned(&self.inner.state);
+            state.store = store;
+            for id in &affected {
+                state.member_cache.remove(id);
+            }
+        }
+        for id in affected {
+            if let Some(run) = self.run_of(&id) {
+                run.membership_changed();
+            }
+        }
         Ok(true)
     }
 
@@ -519,15 +680,17 @@ impl PoolService {
         let mut views = Vec::new();
         for pool in self.pools() {
             let members = self.resolve_members(&pool.id).await;
-            let running = lock_unpoisoned(&self.inner.state)
-                .runs
-                .contains_key(&pool.id);
-            let current_mode = lock_unpoisoned(&self.inner.state)
+            let run = lock_unpoisoned(&self.inner.state)
                 .runs
                 .get(&pool.id)
+                .cloned();
+            let running = run.is_some();
+            let current_mode = run
+                .as_ref()
                 .map(|run| run.current_mode())
                 .unwrap_or_else(|| pool.mode.clone());
             let effective_mode = auto_pool_mode(&pool, &members, &current_mode).to_string();
+            let stable = run.as_ref().map(|run| lock_unpoisoned(&run.runtime));
             let note = notes.get(&pool.id);
             views.push(pool_view(
                 &pool,
@@ -536,6 +699,7 @@ impl PoolService {
                 note.map(String::as_str),
                 &aead_hosts,
                 &effective_mode,
+                stable.as_ref().map(|runtime| &runtime.stable),
             ));
         }
         views
@@ -590,18 +754,21 @@ impl PoolService {
         };
         let mut out = Vec::with_capacity(snapshots.len());
         for (pool, identity) in snapshots {
-            let up = self
-                .resolve_members(&pool.id)
-                .await
-                .into_iter()
-                .filter(|member| member.up)
-                .count();
+            let members = self.resolve_members(&pool.id).await;
+            let up = members.iter().filter(|member| member.up).count();
+            let ready = if pool.mode == POOL_MODE_STABLE {
+                self.run_of(&pool.id)
+                    .is_some_and(|run| run.stable_status(&members).ready)
+            } else {
+                up > 0
+            };
             out.push(PoolEgress {
                 tag: egress_tag(&identity),
                 identity,
                 port: pool.port,
                 cred: pool.cred,
                 up,
+                ready,
             });
         }
         out
@@ -628,6 +795,229 @@ impl PoolService {
         self.dialer_for(id)
     }
 
+    async fn member_current(&self, member: &ResolvedMember) -> bool {
+        let Some(tunnel) = member.tunnel.as_ref() else {
+            return false;
+        };
+        if tunnel.generation() != member.generation || !self.inner.manager.is_current(tunnel).await
+        {
+            return false;
+        }
+        let state = tunnel.state().await;
+        state.status == "up" && state.node.hostname == member.member.host
+    }
+
+    async fn stable_tcp_probe(&self, member: &ResolvedMember) -> Result<Duration> {
+        let dialer = member
+            .dialer
+            .as_ref()
+            .ok_or_else(|| anyhow!("成员没有可用拨号器"))?;
+        let started = Instant::now();
+        let socket = timeout(
+            POOL_TRY_TIMEOUT,
+            dialer.dial(DialNetwork::Tcp, POOL_PROBE_TARGET),
+        )
+        .await
+        .map_err(|_| anyhow!("稳定预检 TCP 拨号超时"))??;
+        drop(socket);
+        Ok(started.elapsed())
+    }
+
+    async fn stable_udp_probe(&self, member: &ResolvedMember) -> Result<()> {
+        let dialer = member
+            .dialer
+            .as_ref()
+            .ok_or_else(|| anyhow!("成员没有可用拨号器"))?;
+        let socket = timeout(
+            POOL_TRY_TIMEOUT,
+            dialer.dial(DialNetwork::Udp, "1.1.1.1:53"),
+        )
+        .await
+        .map_err(|_| anyhow!("稳定预检 UDP 拨号超时"))??;
+        let DialSocket::Udp(socket) = socket else {
+            anyhow::bail!("稳定预检 UDP 返回了错误 socket 类型");
+        };
+        let id = rand::random::<u16>();
+        let mut query = Vec::with_capacity(29);
+        query.extend_from_slice(&id.to_be_bytes());
+        query.extend_from_slice(&[0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]);
+        query.extend_from_slice(&[
+            3, b'o', b'n', b'e', 3, b'o', b'n', b'e', 3, b'o', b'n', b'e', 3, b'o', b'n', b'e', 0,
+        ]);
+        query.extend_from_slice(&[0, 1, 0, 1]);
+        socket.send(&query).await?;
+        let mut response = [0_u8; 512];
+        let len = timeout(Duration::from_secs(2), socket.recv(&mut response))
+            .await
+            .map_err(|_| anyhow!("稳定预检 UDP DNS 响应超时"))??;
+        if len < 12 || response[..2] != id.to_be_bytes() {
+            anyhow::bail!("稳定预检 UDP DNS 响应不匹配");
+        }
+        let flags = u16::from_be_bytes([response[2], response[3]]);
+        if flags & 0x8000 == 0 || flags & 0x000f != 0 {
+            anyhow::bail!("稳定预检 UDP DNS 响应无效");
+        }
+        Ok(())
+    }
+
+    async fn stable_light_probe(&self, member: &ResolvedMember) -> Result<Duration> {
+        if !self.member_current(member).await {
+            anyhow::bail!("成员身份已变化");
+        }
+        let tunnel = member
+            .tunnel
+            .as_ref()
+            .ok_or_else(|| anyhow!("成员没有隧道运行时"))?;
+        tunnel.runtime.local_ready().await?;
+        let tcp = self.stable_tcp_probe(member).await?;
+        self.stable_udp_probe(member).await?;
+        if !self.member_current(member).await {
+            anyhow::bail!("预检期间成员身份已变化");
+        }
+        Ok(tcp)
+    }
+
+    async fn stable_strong_verify(
+        &self,
+        run: &PoolRun,
+        member: &ResolvedMember,
+        membership_epoch: u64,
+    ) -> Result<()> {
+        let expected = member.member.exit_ip.clone();
+        if expected.is_empty() {
+            anyhow::bail!("成员没有可信出口 IP");
+        }
+        let tunnel = member
+            .tunnel
+            .as_ref()
+            .ok_or_else(|| anyhow!("成员没有隧道运行时"))?;
+        tunnel.runtime.verify_ready(&expected).await?;
+        if run.membership_epoch() != membership_epoch || !self.member_current(member).await {
+            anyhow::bail!("强预检期间出口组或成员已变化");
+        }
+        Ok(())
+    }
+
+    async fn stable_preflight(
+        &self,
+        run: &PoolRun,
+        member: &ResolvedMember,
+        membership_epoch: u64,
+    ) -> Result<Duration> {
+        let started = Instant::now();
+        let latency = self.stable_light_probe(member).await?;
+        self.stable_strong_verify(run, member, membership_epoch)
+            .await?;
+        Ok(started.elapsed())
+    }
+
+    async fn stable_dial(
+        &self,
+        run: &Arc<PoolRun>,
+        network: DialNetwork,
+        addr: &str,
+        target: &str,
+        members: Vec<ResolvedMember>,
+    ) -> Result<(DialSocket, String)> {
+        let mut policy_members: Vec<PoolMember> =
+            members.iter().map(|member| member.member.clone()).collect();
+        run.apply_target_state(target, &mut policy_members);
+        run.stable_reconcile(&policy_members);
+
+        let selected = {
+            let _switch = run.stable_switch.lock().await;
+            run.stable_reconcile(&policy_members);
+            if let Some(lease) = run.stable_acquire_lease(&policy_members) {
+                (lease.host, lease)
+            } else {
+                let membership_epoch = run.membership_epoch();
+                let mut last_error = None;
+                let mut switched = None;
+                for _ in 0..3 {
+                    let candidate = run
+                        .stable_candidate(&policy_members, true)
+                        .or_else(|| run.stable_candidate(&policy_members, false));
+                    let Some(host) = candidate else {
+                        break;
+                    };
+                    let Some(member) = members.iter().find(|member| member.member.host == host)
+                    else {
+                        continue;
+                    };
+                    if !run.stable_begin_transition(host.clone()) {
+                        if let Some(lease) = run.stable_acquire_lease(&policy_members) {
+                            switched = Some((lease.host, lease));
+                            break;
+                        }
+                        continue;
+                    }
+                    let preflight = if run.stable_strong_fresh(&host) {
+                        self.stable_light_probe(member).await.map(|_| None)
+                    } else {
+                        self.stable_preflight(run, member, membership_epoch)
+                            .await
+                            .map(Some)
+                    };
+                    match preflight {
+                        Ok(verified_latency) => {
+                            if run.membership_epoch() != membership_epoch
+                                || !self.member_current(member).await
+                            {
+                                run.stable_abort_transition(&policy_members);
+                                continue;
+                            }
+                            if let Some(latency) = verified_latency {
+                                run.stable_mark_verified(&host, latency);
+                            }
+                            if run.stable_commit(&host, &policy_members) {
+                                if let Some(lease) = run.stable_acquire_lease(&policy_members) {
+                                    switched = Some((lease.host, lease));
+                                    break;
+                                }
+                            }
+                            run.stable_abort_transition(&policy_members);
+                        }
+                        Err(error) => {
+                            last_error = Some(error);
+                            run.stable_finish_probe(&host, false, Duration::ZERO);
+                            run.stable_abort_transition(&policy_members);
+                        }
+                    }
+                }
+                switched.ok_or_else(|| {
+                    anyhow!(
+                        "没有通过强预检的稳定出口{}",
+                        last_error
+                            .map(|error| format!("：{error}"))
+                            .unwrap_or_default()
+                    )
+                })?
+            }
+        };
+
+        let (host, lease) = selected;
+        let member = members
+            .iter()
+            .find(|member| member.member.host == host)
+            .ok_or_else(|| anyhow!("稳定出口成员已消失"))?;
+        let _lease = StableLeaseGuard {
+            run: run.clone(),
+            lease,
+        };
+        let outcome = dial_candidate(member, network, addr).await;
+        match outcome.result {
+            Ok(socket) => {
+                run.note_success(target, &host, outcome.elapsed);
+                run.stable_note_dial_success(&host, outcome.elapsed);
+                Ok((socket, host))
+            }
+            Err(error) => {
+                run.stable_note_dial_failure(&host, is_path_failure(&error));
+                Err(error)
+            }
+        }
+    }
+
     /// Selects and dials a pool member, returning the chosen hostname as well
     /// as the socket. No host-network fallback is performed.
     pub async fn dial(
@@ -646,6 +1036,11 @@ impl PoolService {
         run.apply_target_state(&target, &mut policy_members);
         let current_mode = run.current_mode();
         let mode = auto_pool_mode(&pool, &policy_members, &current_mode).to_string();
+        if mode == POOL_MODE_STABLE {
+            return self
+                .stable_dial(&run, network, addr, &target, members)
+                .await;
+        }
         let choice = run.choose_with_mode(
             &target,
             &policy_members,
@@ -707,20 +1102,31 @@ impl PoolService {
             let members = self.resolved_members(&pool.id).await;
             let policy_members: Vec<PoolMember> =
                 members.iter().map(|member| member.member.clone()).collect();
+            run.stable_reconcile(&policy_members);
             let current_mode = run.current_mode();
             let mode = auto_pool_mode(&pool, &policy_members, &current_mode);
             if !matches!(
                 canonical_pool_mode(mode),
-                Some(POOL_MODE_SINGLE) | Some(POOL_MODE_ROUND_ROBIN) | Some(POOL_MODE_BALANCE)
+                Some(POOL_MODE_SINGLE)
+                    | Some(POOL_MODE_ROUND_ROBIN)
+                    | Some(POOL_MODE_BALANCE)
+                    | Some(POOL_MODE_STABLE)
             ) {
                 continue;
             }
+            let stable_mode = mode == POOL_MODE_STABLE;
             let stale: Vec<_> = {
                 let runtime = lock_unpoisoned(&run.runtime);
                 let now = Utc::now();
                 members
                     .iter()
-                    .filter(|member| runtime.needs_probe(mode, &member.member, now))
+                    .filter(|member| {
+                        if stable_mode {
+                            runtime.stable_probe_due(&member.member, Instant::now())
+                        } else {
+                            runtime.needs_probe(mode, &member.member, now)
+                        }
+                    })
                     .cloned()
                     .collect()
             };
@@ -738,31 +1144,94 @@ impl PoolService {
                 }
 
                 let runtime = Arc::clone(&run.runtime);
+                let run_for_probe = Arc::clone(&run);
                 let dialer = Arc::clone(dialer);
                 let host = member.member.host.clone();
                 let shutdown = self.inner.shutdown.clone();
                 let weak = Arc::downgrade(&self.inner);
+                let probe_limit = self.inner.probe_limit.clone();
                 tokio::spawn(async move {
-                    let started = Instant::now();
-                    let attempt = tokio::select! {
-                        biased;
-                        _ = shutdown.cancelled() => None,
-                        result = timeout(
-                            POOL_TRY_TIMEOUT,
-                            dialer.dial(DialNetwork::Tcp, POOL_PROBE_TARGET),
-                        ) => Some(result),
-                    };
-                    if let Some(result) = attempt {
-                        match result {
-                            Ok(Ok(DialSocket::Tcp(socket))) => {
-                                drop(socket);
-                                lock_unpoisoned(&runtime).note_success(
-                                    &host,
-                                    started.elapsed(),
-                                    Utc::now(),
-                                );
+                    if stable_mode {
+                        let _permit = probe_limit.acquire_owned().await.ok();
+                        if let Some(service) = weak.upgrade() {
+                            let attempt = tokio::select! {
+                                biased;
+                                _ = shutdown.cancelled() => None,
+                                result = service.stable_light_probe(&member) => Some(result),
+                            };
+                            if let Some(result) = attempt {
+                                match result {
+                                    Ok(latency) => {
+                                        lock_unpoisoned(&runtime).note_success(
+                                            &host,
+                                            latency,
+                                            Utc::now(),
+                                        );
+                                        lock_unpoisoned(&runtime).stable.finish_probe(
+                                            &host,
+                                            true,
+                                            latency,
+                                            Instant::now(),
+                                        );
+                                        if run_for_probe.stable_strong_due(&host) {
+                                            let epoch = run_for_probe.membership_epoch();
+                                            match service
+                                                .stable_strong_verify(
+                                                    &run_for_probe,
+                                                    &member,
+                                                    epoch,
+                                                )
+                                                .await
+                                            {
+                                                Ok(()) => lock_unpoisoned(&runtime)
+                                                    .stable
+                                                    .mark_verified(&host, latency, Instant::now()),
+                                                Err(error) => {
+                                                    debug!("稳定模式强预检 {host} 失败: {error}");
+                                                    lock_unpoisoned(&runtime).stable.finish_probe(
+                                                        &host,
+                                                        false,
+                                                        Duration::ZERO,
+                                                        Instant::now(),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        debug!("稳定模式备选 {host} 预检失败: {error}");
+                                        lock_unpoisoned(&runtime).stable.finish_probe(
+                                            &host,
+                                            false,
+                                            Duration::ZERO,
+                                            Instant::now(),
+                                        );
+                                    }
+                                }
                             }
-                            _ => lock_unpoisoned(&runtime).note_failure(&host, Utc::now()),
+                        }
+                    } else {
+                        let started = Instant::now();
+                        let attempt = tokio::select! {
+                            biased;
+                            _ = shutdown.cancelled() => None,
+                            result = timeout(
+                                POOL_TRY_TIMEOUT,
+                                dialer.dial(DialNetwork::Tcp, POOL_PROBE_TARGET),
+                            ) => Some(result),
+                        };
+                        if let Some(result) = attempt {
+                            match result {
+                                Ok(Ok(DialSocket::Tcp(socket))) => {
+                                    drop(socket);
+                                    lock_unpoisoned(&runtime).note_success(
+                                        &host,
+                                        started.elapsed(),
+                                        Utc::now(),
+                                    );
+                                }
+                                _ => lock_unpoisoned(&runtime).note_failure(&host, Utc::now()),
+                            }
                         }
                     }
                     if let Some(service) = weak.upgrade() {
@@ -1054,12 +1523,22 @@ impl PoolService {
     }
 
     async fn swap_member_locked(&self, id: &str, old_host: &str, new_host: &str) -> Result<()> {
-        let mut state = lock_unpoisoned(&self.inner.state);
-        let mut store = state.store.clone();
-        if store.swap_member(id, old_host, new_host)? {
-            store.save(&self.inner.dir)?;
-            state.store = store;
-            state.member_cache.remove(id);
+        let changed = {
+            let mut state = lock_unpoisoned(&self.inner.state);
+            let mut store = state.store.clone();
+            if store.swap_member(id, old_host, new_host)? {
+                store.save(&self.inner.dir)?;
+                state.store = store;
+                state.member_cache.remove(id);
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            if let Some(run) = self.run_of(id) {
+                run.membership_changed();
+            }
         }
         Ok(())
     }
@@ -1076,6 +1555,14 @@ impl PoolService {
             return;
         };
         let used_by_pool = host_in_pool(&self.pools(), host);
+        let stable_pinned = lock_unpoisoned(&self.inner.state)
+            .runs
+            .values()
+            .any(|run| run.stable_pinned(host));
+        if stable_pinned {
+            debug!("稳定模式仍在租约或回滚窗口内使用 {host}，推迟退休");
+            return;
+        }
         let inbound_bound = self.host_bound(host).await;
         if let Some(slot) = retire_slot(
             host,
@@ -1143,6 +1630,10 @@ impl PoolService {
     }
 
     async fn resolved_members(&self, id: &str) -> Vec<ResolvedMember> {
+        if self.pool(id).is_none() {
+            lock_unpoisoned(&self.inner.state).member_cache.remove(id);
+            return Vec::new();
+        }
         if let Some((_at, members)) = lock_unpoisoned(&self.inner.state)
             .member_cache
             .get(id)
@@ -1163,9 +1654,15 @@ impl PoolService {
                 continue;
             };
             let dialer = tunnel.runtime.socks_dialer();
+            let generation = tunnel.generation();
             by_host.insert(
                 state.node.hostname.clone(),
-                ResolvedTunnel { state, dialer },
+                ResolvedTunnel {
+                    tunnel: Arc::clone(&tunnel),
+                    generation,
+                    state,
+                    dialer,
+                },
             );
         }
         let run = self.run_of(id);
@@ -1194,6 +1691,8 @@ impl PoolService {
                 ResolvedMember {
                     member,
                     dialer: tunnel.map(|tunnel| Arc::clone(&tunnel.dialer)),
+                    tunnel: tunnel.map(|tunnel| Arc::clone(&tunnel.tunnel)),
+                    generation: tunnel.map_or(0, |tunnel| tunnel.generation),
                 }
             })
             .collect();
@@ -1340,6 +1839,8 @@ impl PoolService {
 
 #[derive(Clone)]
 struct ResolvedTunnel {
+    tunnel: Arc<Tunnel>,
+    generation: u64,
     state: TunnelState,
     dialer: Arc<dyn SocksDialer>,
 }
@@ -1348,6 +1849,8 @@ struct ResolvedTunnel {
 struct ResolvedMember {
     member: PoolMember,
     dialer: Option<Arc<dyn SocksDialer>>,
+    tunnel: Option<Arc<Tunnel>>,
+    generation: u64,
 }
 
 struct AttemptOutcome {
@@ -1358,6 +1861,24 @@ struct AttemptOutcome {
 
 fn usable(member: &ResolvedMember) -> bool {
     member.member.up && !member.member.namespace.is_empty() && member.dialer.is_some()
+}
+
+fn is_path_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::NotConnected
+            )
+        })
+    })
 }
 
 async fn dial_candidate(

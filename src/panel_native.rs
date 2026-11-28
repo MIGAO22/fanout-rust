@@ -893,7 +893,7 @@ impl RuntimeSnapshot {
             }
         }
         for pool in &self.pools {
-            live.insert(sanitize_tag(&pool_identity(&pool.id)), pool.up > 0);
+            live.insert(sanitize_tag(&pool_identity(&pool.id)), pool.ready);
         }
         live
     }

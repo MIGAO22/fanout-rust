@@ -1042,6 +1042,7 @@ fn pool_view_projects_runtime_state_and_mode_aliases() {
         Some("waiting"),
         &HashSet::from(["a".to_string()]),
         POOL_MODE_LATENCY,
+        None,
     );
     assert_eq!(view.identity, "pool-p1");
     assert_eq!(view.mode, POOL_MODE_LATENCY);
@@ -1053,6 +1054,72 @@ fn pool_view_projects_runtime_state_and_mode_aliases() {
     assert_eq!(view.members[1].status, "missing");
     assert_eq!(view.fill_note, "waiting");
     assert_eq!(view.socks_user, "u");
+}
+
+#[test]
+fn stable_mode_requires_verified_switch_and_preserves_inflight_leases() {
+    let now = Instant::now();
+    let members = [
+        up_member("a", Duration::from_millis(50)),
+        up_member("b", Duration::from_millis(40)),
+        up_member("c", Duration::from_millis(60)),
+    ];
+    let mut state = StableState::default();
+    state.reconcile(&members, now);
+    assert!(state.acquire_lease(&members).is_none());
+
+    assert!(state.begin_transition("a".into(), now));
+    state.mark_verified("a", Duration::from_millis(50), now);
+    assert!(state.commit("a", &members, now));
+    let old_lease = state.acquire_lease(&members).unwrap();
+    assert_eq!(old_lease.host, "a");
+
+    assert!(state.begin_probe("b", now));
+    state.finish_probe("b", true, Duration::from_millis(40), now);
+    assert!(state.candidate(&members, true).is_none());
+    assert!(!state.commit("b", &members, now));
+    assert!(state.begin_probe("b", now));
+    state.finish_probe("b", true, Duration::from_millis(40), now);
+    assert!(state.begin_transition("b".into(), now));
+    assert!(state.commit("b", &members, now));
+
+    let new_lease = state.acquire_lease(&members).unwrap();
+    assert_eq!(new_lease.host, "b");
+    assert!(state.pinned("a", now));
+    state.release_lease(&old_lease);
+    state.release_lease(&new_lease);
+    assert!(state.pinned("a", now));
+
+    state.note_dial_failure("b", true, now);
+    assert_eq!(state.status(&members, now).phase, "observing");
+    state.note_dial_failure("b", true, now);
+    state.reconcile(&members, now);
+    assert_eq!(state.status(&members, now).phase, "rollback");
+    assert!(state.rollback(&members, now));
+    assert_eq!(state.status(&members, now).active, "a");
+}
+
+#[test]
+fn stable_mode_is_explicit_and_never_falls_through_to_round_robin() {
+    let pool = Pool {
+        mode: POOL_MODE_STABLE.into(),
+        auto_strategy: true,
+        ..Pool::default()
+    };
+    let members = [
+        up_member("a", Duration::ZERO),
+        up_member("b", Duration::ZERO),
+    ];
+    assert_eq!(
+        auto_pool_mode(&pool, &members, POOL_MODE_SINGLE),
+        POOL_MODE_STABLE
+    );
+    assert!(PoolPolicy::new(POOL_MODE_STABLE, 1)
+        .pick("target", &members)
+        .order
+        .is_empty());
+    assert_eq!(models::pool_mode_label(POOL_MODE_STABLE), "稳定模式");
+    assert!(!models::pool_mode_desc(POOL_MODE_STABLE).is_empty());
 }
 
 #[test]

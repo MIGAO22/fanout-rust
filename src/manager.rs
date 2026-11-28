@@ -294,6 +294,14 @@ impl Manager {
         v
     }
 
+    pub async fn is_current(&self, tunnel: &Arc<Tunnel>) -> bool {
+        self.tunnels
+            .lock()
+            .await
+            .get(&tunnel.slot)
+            .is_some_and(|current| Arc::ptr_eq(current, tunnel))
+    }
+
     pub async fn states(&self) -> Vec<TunnelState> {
         let mut out = Vec::new();
         for t in self.tunnels().await {

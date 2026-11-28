@@ -717,9 +717,12 @@ let poolEdit = '';     // 正在编辑的组 ID，空串表示新建
 let poolMode = 'single';
 let poolCountries = [];
 
+function poolServing(p){
+  return !!p.running && (p.mode === 'stable' ? !!p.ready : p.up > 0);
+}
 function poolState(p){
-  if(!p.running) return 'failed';
-  return p.up > 0 ? 'up' : 'failed';
+  if(!poolServing(p)) return 'failed';
+  return 'up';
 }
 
 function renderPools(){
@@ -746,11 +749,12 @@ function poolRow(p){
   const st = poolState(p);
   const mem = (p.members || []).map(m => {
     const ok = m.status === 'up';
-    const bits = [m.status, m.exit_ip, m.latency_ms ? m.latency_ms + 'ms' : '', m.cooling ? '冷却中' : '', m.aead ? '支持 AEAD' : '']
+    const role = {active:'当前出口',standby:'备选',preflight:'预检中'}[m.stable_role] || '';
+    const bits = [role, m.status, m.exit_ip, m.latency_ms ? m.latency_ms + 'ms' : '', m.cooling ? '冷却中' : '', m.aead ? '支持 AEAD' : '']
       .filter(Boolean).join(' · ');
-    return '<span class="chip' + (ok ? '' : ' off') + '" title="' + esc(m.host + ' · ' + bits) + '">'
+    return '<span class="chip' + (ok ? '' : ' off') + (m.stable_role === 'active' ? ' acc' : m.stable_role === 'preflight' ? ' warn' : '') + '" title="' + esc(m.host + ' · ' + bits) + '">'
       + '<span class="p">' + esc(m.status === 'up' ? 'OK' : (m.status === 'missing' ? '没了' : m.status)) + '</span>'
-      + esc(m.host) + '</span>';
+      + esc(m.host) + (role ? '<span class="pt">' + esc(role) + '</span>' : '') + '</span>';
   }).join('');
 
   const ibs = (p.inbounds || []).length
@@ -763,7 +767,10 @@ function poolRow(p){
 
   const warn = !p.running
     ? '<div class="errbox"><b>组没在跑</b>本机监听没起来，绑到它的链接会直接失败</div>'
-    : (p.up === 0 ? '<div class="errbox"><b>组内没有可用出口</b>连接会失败，不会退回母机直连</div>' : '');
+    : (!poolServing(p)
+      ? '<div class="errbox"><b>' + (p.mode === 'stable' ? '稳定模式等待可用出口' : '组内没有可用出口') + '</b>'
+        + (p.mode === 'stable' ? '备选正在预检，只有通过强验证后才会切换；已有连接不受影响。' : '连接会失败，不会退回母机直连') + '</div>'
+      : '');
 
   const fillTag = p.auto_fill
     ? ' <span class="pt" title="掉线后先用在线出口顶上来，在线的不够才新建">自动补齐 ' + p.size + ' 条</span>'
@@ -773,7 +780,19 @@ function poolRow(p){
     : '';
   const autoTag = p.auto_strategy
     ? ' <span class="badge acc" title="根据实时质量自动调整策略">自动 → '
-      + esc(({single:'单一',roundrobin:'轮询',latency:'均衡',race:'并发'}[p.effective_mode] || p.effective_mode || '—')) + '</span>'
+      + esc(({single:'单一',roundrobin:'轮询',latency:'均衡',race:'并发',stable:'稳定'}[p.effective_mode] || p.effective_mode || '—')) + '</span>'
+    : '';
+  const stableText = p.stable_phase === 'preflight'
+    ? '预检 ' + (p.stable_preflight || '备选')
+    : p.stable_phase === 'rollback'
+      ? '回滚观察'
+      : p.stable_phase === 'observing'
+        ? '切换观察 ' + (p.stable_active || '—')
+        : p.stable_phase === 'degraded'
+          ? '等待可用出口'
+          : '当前 ' + (p.stable_active || '—');
+  const stableTag = p.mode === 'stable'
+    ? ' <span class="badge ' + (p.ready ? 'ok' : p.stable_phase === 'preflight' ? 'warn' : 'bad') + '">' + esc(stableText) + '</span>'
     : '';
   // 没补齐时后端会写一句原因（在线出口都用上了 / 槽位余量不够 / 挑不到节点）。
   // 只在还缺人的时候显示，补齐了就闭嘴，否则一个正常的组永远挂着灰字。
@@ -787,7 +806,7 @@ function poolRow(p){
     + '<span class="nm">' + esc(p.name)
     +   ' <span class="pt">' + esc(p.mode_label) + '</span>'
     +   ' <span class="pt">' + p.up + '/' + p.total + ' 可用</span>'
-    +   fillTag + countryTag + autoTag + '</span>'
+    +   fillTag + countryTag + autoTag + stableTag + '</span>'
     + '<span class="spacer"></span>'
     + '<span class="none">' + esc(p.mode_desc || '') + '</span>'
     + '</div>'
@@ -1173,7 +1192,9 @@ async function poll(){
 function schedule(){
   clearTimeout(pollTimer);
   const active = jobs.some(j => j.status === 'running')
-    || (view.exits || []).some(e => e.status === 'starting');
+    || (view.exits || []).some(e => e.status === 'starting')
+    || (view.pools || []).some(p => p.mode === 'stable'
+      && ['preflight', 'observing', 'rollback'].includes(p.stable_phase));
   let ms = active ? 1500 : 4000;
   if(document.hidden) ms = 15000;
   pollTimer = setTimeout(poll, ms);
@@ -1554,7 +1575,7 @@ function exitOptions(currentHost){
   const current = boundValue(currentHost);
   const up = (view.exits || []).filter(e => e.status === 'up');
   // 出口组排在单出口之前：会去看这个下拉的人多半正是为了保活才来的
-  const pools = (view.pools || []).filter(p => p.running && p.up > 0);
+  const pools = (view.pools || []).filter(poolServing);
   const pg = pools.length
     ? '<optgroup label="出口组（组内自动选路）">'
       + pools.map(p => '<option value="' + esc(p.identity) + '"'

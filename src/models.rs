@@ -127,6 +127,8 @@ pub struct PoolMemberView {
     pub latency_ms: i64,
     pub cooling: bool,
     pub aead: bool,
+    #[serde(default)]
+    pub stable_role: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -142,6 +144,8 @@ pub struct PoolView {
     pub rr_step: usize,
     pub port: u16,
     pub running: bool,
+    #[serde(default)]
+    pub ready: bool,
     pub up: usize,
     pub total: usize,
     pub socks_user: String,
@@ -156,6 +160,31 @@ pub struct PoolView {
     pub preferred_countries: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fill_note: String,
+    #[serde(default)]
+    pub stable_phase: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stable_active: String,
+    #[serde(default)]
+    pub stable_standby: usize,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stable_preflight: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stable_switch_from: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stable_switch_to: String,
+    #[serde(default)]
+    pub stable_rollback: bool,
+}
+
+impl PoolView {
+    pub fn serving(&self) -> bool {
+        self.running
+            && if self.mode == "stable" {
+                self.ready
+            } else {
+                self.up > 0
+            }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -385,7 +414,7 @@ pub struct PoolStore {
     pub pools: Vec<Pool>,
 }
 
-pub const POOL_MODES: &[&str] = &["single", "roundrobin", "latency", "race"];
+pub const POOL_MODES: &[&str] = &["single", "roundrobin", "latency", "race", "stable"];
 pub const POOL_DEFAULT_RR_STEP: usize = 5;
 pub const POOL_MAX_HOSTS: usize = 32;
 pub const MAX_EXITS: usize = 20;
@@ -396,6 +425,7 @@ pub fn pool_mode_label(mode: &str) -> &'static str {
         "roundrobin" => "轮询出口",
         "latency" => "负载均衡出口",
         "race" => "并发出口",
+        "stable" => "稳定模式",
         _ => "",
     }
 }
@@ -406,6 +436,7 @@ pub fn pool_mode_desc(mode: &str) -> &'static str {
         "roundrobin" => "每 N 个新目标换一条",
         "latency" => "在延迟接近的最快出口间轮换，避免单条过载",
         "race" => "同时向组内所有可用出口发起，谁先通用谁",
+        "stable" => "咬住当前出口，备选持续预检；切换前强验证，通过后原子切换，已有连接不中断",
         _ => "",
     }
 }

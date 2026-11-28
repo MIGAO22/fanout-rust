@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use crate::models::{POOL_DEFAULT_RR_STEP, POOL_MAX_HOSTS, POOL_MODES};
 
@@ -13,6 +13,7 @@ pub const POOL_MODE_SINGLE: &str = "single";
 pub const POOL_MODE_ROUND_ROBIN: &str = "roundrobin";
 pub const POOL_MODE_BALANCE: &str = "balance";
 pub const POOL_MODE_CONCURRENT: &str = "concurrent";
+pub const POOL_MODE_STABLE: &str = "stable";
 // The Rust UI already uses these two spellings. Accept them without rewriting
 // stored JSON, while treating them as the Go policies during selection.
 pub const POOL_MODE_LATENCY: &str = "latency";
@@ -37,6 +38,11 @@ pub const POOL_COOL_MAX: Duration = Duration::from_secs(180);
 pub const POOL_PROBE_INTERVAL: Duration = Duration::from_secs(20);
 pub const POOL_PROBE_STALE: Duration = Duration::from_secs(120);
 pub const POOL_PROBE_TARGET: &str = "1.1.1.1:443";
+pub const POOL_STABLE_PROBE_INTERVAL: Duration = Duration::from_secs(20);
+pub const POOL_STABLE_SUCCESSES: u32 = 2;
+pub const POOL_STABLE_OBSERVE: Duration = Duration::from_secs(30);
+pub const POOL_STABLE_PREVIOUS_PIN: Duration = Duration::from_secs(600);
+pub const POOL_STABLE_FAILURES: u32 = 2;
 
 pub const POOL_FILL_INTERVAL: Duration = Duration::from_secs(10);
 pub const POOL_FILL_DEAD_AFTER: Duration = Duration::from_secs(90);
@@ -54,6 +60,7 @@ pub fn canonical_pool_mode(mode: &str) -> Option<&'static str> {
         POOL_MODE_ROUND_ROBIN => Some(POOL_MODE_ROUND_ROBIN),
         POOL_MODE_BALANCE | POOL_MODE_LATENCY => Some(POOL_MODE_BALANCE),
         POOL_MODE_CONCURRENT | POOL_MODE_RACE => Some(POOL_MODE_CONCURRENT),
+        POOL_MODE_STABLE => Some(POOL_MODE_STABLE),
         _ => None,
     }
 }
@@ -434,6 +441,9 @@ impl PoolPolicy {
         };
         let mode = canonical_pool_mode(&self.mode);
 
+        if mode == Some(POOL_MODE_STABLE) {
+            return PoolChoice::default();
+        }
         if mode == Some(POOL_MODE_CONCURRENT) {
             return PoolChoice {
                 order: available.clone(),
@@ -590,6 +600,458 @@ impl PoolPolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StablePhase {
+    #[default]
+    Idle,
+    Active,
+    Preflight,
+    Observing,
+    Rollback,
+    Degraded,
+}
+
+impl StablePhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Active => "active",
+            Self::Preflight => "preflight",
+            Self::Observing => "observing",
+            Self::Rollback => "rollback",
+            Self::Degraded => "degraded",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StableHealth {
+    Unknown,
+    Healthy,
+    Suspect,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+struct StableMemberHealth {
+    health: StableHealth,
+    successes: u32,
+    failures: u32,
+    latency: Duration,
+    last_success: Option<Instant>,
+    strong_verified_at: Option<Instant>,
+    retry_at: Option<Instant>,
+}
+
+impl Default for StableMemberHealth {
+    fn default() -> Self {
+        Self {
+            health: StableHealth::Unknown,
+            successes: 0,
+            failures: 0,
+            latency: Duration::ZERO,
+            last_success: None,
+            strong_verified_at: None,
+            retry_at: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StableTransition {
+    from: String,
+    to: String,
+    started_at: Instant,
+}
+
+#[derive(Clone, Debug)]
+pub struct StableLease {
+    pub host: String,
+    pub route_version: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StableStatus {
+    pub phase: String,
+    pub active: String,
+    pub ready: bool,
+    pub standby: usize,
+    pub preflight: String,
+    pub switch_from: String,
+    pub switch_to: String,
+    pub rollback: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StableState {
+    active: Option<String>,
+    previous: Option<String>,
+    previous_until: Option<Instant>,
+    phase: StablePhase,
+    route_version: u64,
+    leases: HashMap<String, usize>,
+    inflight: HashSet<String>,
+    transition: Option<StableTransition>,
+    rollback_until: Option<Instant>,
+    health: HashMap<String, StableMemberHealth>,
+}
+
+fn stable_ewma(previous: Duration, sample: Duration) -> Duration {
+    if previous.is_zero() {
+        sample
+    } else if sample >= previous {
+        previous + (sample - previous) / 2
+    } else {
+        previous - (previous - sample) / 2
+    }
+}
+
+impl StableState {
+    fn member<'a>(&self, members: &'a [PoolMember], host: &str) -> Option<&'a PoolMember> {
+        member_of(members, host)
+    }
+
+    fn usable(&self, members: &[PoolMember], host: &str) -> bool {
+        self.member(members, host).is_some_and(|member| {
+            member.up
+                && !member.cooling
+                && self
+                    .health
+                    .get(host)
+                    .is_none_or(|health| health.health != StableHealth::Failed)
+        })
+    }
+
+    fn eligible(&self, members: &[PoolMember], host: &str) -> bool {
+        self.usable(members, host)
+            && self.health.get(host).is_some_and(|health| {
+                health.health == StableHealth::Healthy && health.successes >= POOL_STABLE_SUCCESSES
+            })
+    }
+
+    pub fn reconcile(&mut self, members: &[PoolMember], now: Instant) {
+        let hosts: HashSet<&str> = members.iter().map(|member| member.host.as_str()).collect();
+        self.health.retain(|host, _| hosts.contains(host.as_str()));
+        self.inflight.retain(|host| hosts.contains(host.as_str()));
+        self.leases.retain(|host, _| hosts.contains(host.as_str()));
+        if self
+            .active
+            .as_deref()
+            .is_some_and(|host| !hosts.contains(host))
+        {
+            self.active = None;
+            self.transition = None;
+            self.rollback_until = None;
+        }
+        if self
+            .previous
+            .as_deref()
+            .is_some_and(|host| !hosts.contains(host))
+        {
+            self.previous = None;
+            self.previous_until = None;
+        }
+        self.refresh_phase(members, now);
+    }
+
+    fn refresh_phase(&mut self, members: &[PoolMember], now: Instant) {
+        if self.transition.is_some() {
+            self.phase = StablePhase::Preflight;
+            return;
+        }
+        if self.rollback_until.is_some_and(|until| now < until) {
+            self.phase = if self.active.as_deref().is_some_and(|host| {
+                self.health
+                    .get(host)
+                    .is_some_and(|health| health.health == StableHealth::Failed)
+            }) {
+                StablePhase::Rollback
+            } else {
+                StablePhase::Observing
+            };
+            return;
+        }
+        self.rollback_until = None;
+        self.phase = if self
+            .active
+            .as_deref()
+            .is_some_and(|host| self.usable(members, host))
+        {
+            StablePhase::Active
+        } else {
+            StablePhase::Degraded
+        };
+    }
+
+    pub fn acquire_lease(&mut self, members: &[PoolMember]) -> Option<StableLease> {
+        let host = self.active.as_deref()?;
+        if !self.usable(members, host) {
+            return None;
+        }
+        *self.leases.entry(host.to_string()).or_default() += 1;
+        Some(StableLease {
+            host: host.to_string(),
+            route_version: self.route_version,
+        })
+    }
+
+    pub fn release_lease(&mut self, lease: &StableLease) {
+        if let Some(count) = self.leases.get_mut(&lease.host) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.leases.remove(&lease.host);
+            }
+        }
+    }
+
+    pub fn pinned(&self, host: &str, now: Instant) -> bool {
+        self.active.as_deref() == Some(host)
+            || (self.previous.as_deref() == Some(host)
+                && self.previous_until.is_some_and(|until| now < until))
+            || self.leases.contains_key(host)
+            || self
+                .transition
+                .as_ref()
+                .is_some_and(|transition| transition.from == host || transition.to == host)
+    }
+
+    pub fn begin_probe(&mut self, host: &str, now: Instant) -> bool {
+        if self.inflight.contains(host) {
+            return false;
+        }
+        if self
+            .health
+            .get(host)
+            .and_then(|health| health.retry_at)
+            .is_some_and(|retry| now < retry)
+        {
+            return false;
+        }
+        self.inflight.insert(host.to_string());
+        true
+    }
+
+    pub fn finish_probe(&mut self, host: &str, ok: bool, latency: Duration, now: Instant) {
+        self.inflight.remove(host);
+        let health = self.health.entry(host.to_string()).or_default();
+        if ok {
+            health.successes = health.successes.saturating_add(1);
+            health.failures = 0;
+            health.health = StableHealth::Healthy;
+            health.last_success = Some(now);
+            health.retry_at = None;
+            health.latency = stable_ewma(health.latency, latency);
+        } else {
+            health.successes = 0;
+            health.failures = health.failures.saturating_add(1);
+            health.strong_verified_at = None;
+            health.health = if health.failures >= POOL_STABLE_FAILURES {
+                StableHealth::Failed
+            } else {
+                StableHealth::Suspect
+            };
+            let backoff =
+                Duration::from_secs(5_u64.pow(health.failures.min(3))).min(Duration::from_secs(60));
+            health.retry_at = Some(now + backoff);
+        }
+    }
+
+    pub fn mark_verified(&mut self, host: &str, latency: Duration, now: Instant) {
+        let health = self.health.entry(host.to_string()).or_default();
+        health.health = StableHealth::Healthy;
+        health.successes = health.successes.max(POOL_STABLE_SUCCESSES);
+        health.failures = 0;
+        health.last_success = Some(now);
+        health.strong_verified_at = Some(now);
+        health.retry_at = None;
+        health.latency = latency;
+    }
+
+    pub fn strong_fresh(&self, host: &str, now: Instant) -> bool {
+        self.health
+            .get(host)
+            .and_then(|health| health.strong_verified_at)
+            .is_some_and(|verified| now.duration_since(verified) < Duration::from_secs(30))
+    }
+
+    pub fn strong_due(&self, host: &str, now: Instant) -> bool {
+        self.health.get(host).is_some_and(|health| {
+            health.health == StableHealth::Healthy
+                && health.successes >= POOL_STABLE_SUCCESSES
+                && health
+                    .strong_verified_at
+                    .is_none_or(|verified| now.duration_since(verified) >= Duration::from_secs(60))
+        })
+    }
+
+    pub fn note_dial_success(&mut self, host: &str, latency: Duration, now: Instant) {
+        if self.active.as_deref() != Some(host) {
+            return;
+        }
+        let health = self.health.entry(host.to_string()).or_default();
+        health.health = StableHealth::Healthy;
+        health.successes = health.successes.max(POOL_STABLE_SUCCESSES);
+        health.failures = 0;
+        health.last_success = Some(now);
+        health.retry_at = None;
+        health.latency = if health.latency.is_zero() {
+            latency
+        } else {
+            health.latency + (latency - health.latency) / 2
+        };
+    }
+
+    pub fn note_dial_failure(&mut self, host: &str, path_failure: bool, now: Instant) {
+        if self.active.as_deref() != Some(host) || !path_failure {
+            return;
+        }
+        let health = self.health.entry(host.to_string()).or_default();
+        health.successes = 0;
+        health.failures = health.failures.saturating_add(1);
+        health.strong_verified_at = None;
+        health.health = if health.failures >= POOL_STABLE_FAILURES {
+            StableHealth::Failed
+        } else {
+            StableHealth::Suspect
+        };
+    }
+
+    pub fn candidate(&self, members: &[PoolMember], verified_only: bool) -> Option<String> {
+        let active = self.active.as_deref();
+        let mut candidates: Vec<_> = members
+            .iter()
+            .filter(|member| {
+                member.up
+                    && !member.cooling
+                    && Some(member.host.as_str()) != active
+                    && !self.inflight.contains(&member.host)
+                    && (!verified_only || self.eligible(members, &member.host))
+            })
+            .cloned()
+            .collect();
+        candidates.sort_by(|a, b| {
+            let a_health = self.health.get(&a.host).map(|health| health.latency);
+            let b_health = self.health.get(&b.host).map(|health| health.latency);
+            a_health
+                .unwrap_or(Duration::ZERO)
+                .cmp(&b_health.unwrap_or(Duration::ZERO))
+                .then_with(|| a.host.cmp(&b.host))
+        });
+        candidates.into_iter().next().map(|member| member.host)
+    }
+
+    pub fn begin_transition(&mut self, candidate: String, now: Instant) -> bool {
+        if self.transition.is_some() {
+            return false;
+        }
+        let from = self.active.clone().unwrap_or_default();
+        self.transition = Some(StableTransition {
+            from,
+            to: candidate,
+            started_at: now,
+        });
+        self.phase = StablePhase::Preflight;
+        true
+    }
+
+    pub fn abort_transition(&mut self, members: &[PoolMember], now: Instant) {
+        self.transition = None;
+        self.refresh_phase(members, now);
+    }
+
+    pub fn commit(&mut self, candidate: &str, members: &[PoolMember], now: Instant) -> bool {
+        if !self
+            .transition
+            .as_ref()
+            .is_some_and(|transition| transition.to == candidate)
+            || !self.eligible(members, candidate)
+        {
+            return false;
+        }
+        self.previous = self.active.take();
+        self.previous_until = Some(now + POOL_STABLE_PREVIOUS_PIN);
+        self.active = Some(candidate.to_string());
+        self.route_version = self.route_version.saturating_add(1);
+        self.transition = None;
+        self.rollback_until = Some(now + POOL_STABLE_OBSERVE);
+        self.phase = StablePhase::Observing;
+        true
+    }
+
+    pub fn rollback(&mut self, members: &[PoolMember], now: Instant) -> bool {
+        if !matches!(self.phase, StablePhase::Observing | StablePhase::Rollback) {
+            return false;
+        }
+        let Some(previous) = self.previous.clone() else {
+            return false;
+        };
+        if !self.usable(members, &previous) {
+            return false;
+        }
+        self.previous = self.active.take();
+        self.previous_until = Some(now + POOL_STABLE_PREVIOUS_PIN);
+        self.active = Some(previous);
+        self.route_version = self.route_version.saturating_add(1);
+        self.rollback_until = Some(now + POOL_STABLE_OBSERVE);
+        self.phase = StablePhase::Observing;
+        true
+    }
+
+    pub fn probe_due(&self, host: &str, now: Instant) -> bool {
+        if self.inflight.contains(host) {
+            return false;
+        }
+        self.health.get(host).map_or(true, |health| {
+            health.retry_at.is_some_and(|retry| now >= retry)
+                || health
+                    .last_success
+                    .is_none_or(|last| now.duration_since(last) >= POOL_STABLE_PROBE_INTERVAL)
+        })
+    }
+
+    pub fn status(&self, members: &[PoolMember], now: Instant) -> StableStatus {
+        let mut status = StableStatus {
+            phase: self.phase.as_str().into(),
+            active: self.active.clone().unwrap_or_default(),
+            ready: self
+                .active
+                .as_deref()
+                .is_some_and(|host| self.usable(members, host)),
+            standby: members
+                .iter()
+                .filter(|member| member.up && Some(member.host.as_str()) != self.active.as_deref())
+                .count(),
+            rollback: matches!(self.phase, StablePhase::Observing | StablePhase::Rollback)
+                && self.rollback_until.is_some_and(|until| now < until),
+            ..StableStatus::default()
+        };
+        if let Some(transition) = &self.transition {
+            status.preflight = transition.to.clone();
+            status.switch_from = transition.from.clone();
+            status.switch_to = transition.to.clone();
+        }
+        status
+    }
+
+    pub fn role(&self, host: &str) -> &'static str {
+        if self
+            .transition
+            .as_ref()
+            .is_some_and(|transition| transition.to == host)
+        {
+            "preflight"
+        } else if self.active.as_deref() == Some(host) {
+            "active"
+        } else {
+            "standby"
+        }
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 pub fn member_of<'a>(members: &'a [PoolMember], host: &str) -> Option<&'a PoolMember> {
     members.iter().find(|member| member.host == host)
 }
@@ -692,6 +1154,7 @@ impl MemberStat {
 pub struct PoolRuntimeState {
     pub policy: PoolPolicy,
     pub stats: HashMap<String, MemberStat>,
+    pub stable: StableState,
     target_stats: HashMap<(String, String), Duration>,
 }
 
@@ -700,7 +1163,16 @@ impl PoolRuntimeState {
         Self {
             policy: PoolPolicy::new(mode, step),
             stats: HashMap::new(),
+            stable: StableState::default(),
             target_stats: HashMap::new(),
+        }
+    }
+
+    pub fn reconfigure(&mut self, mode: &str, step: usize) {
+        let entering_stable = mode == POOL_MODE_STABLE && self.policy.mode != POOL_MODE_STABLE;
+        self.policy.reconfigure(mode, step);
+        if mode != POOL_MODE_STABLE || entering_stable {
+            self.stable.reset();
         }
     }
 
@@ -763,7 +1235,10 @@ impl PoolRuntimeState {
     pub fn needs_probe(&self, mode: &str, member: &PoolMember, now: DateTime<Utc>) -> bool {
         if !matches!(
             canonical_pool_mode(mode),
-            Some(POOL_MODE_SINGLE) | Some(POOL_MODE_ROUND_ROBIN) | Some(POOL_MODE_BALANCE)
+            Some(POOL_MODE_SINGLE)
+                | Some(POOL_MODE_ROUND_ROBIN)
+                | Some(POOL_MODE_BALANCE)
+                | Some(POOL_MODE_STABLE)
         ) || !member.up
             || member.namespace.is_empty()
         {
@@ -773,9 +1248,16 @@ impl PoolRuntimeState {
             .get(&member.host)
             .is_none_or(|stat| stat.is_stale(now))
     }
+
+    pub fn stable_probe_due(&self, member: &PoolMember, now: Instant) -> bool {
+        self.policy.mode == POOL_MODE_STABLE
+            && member.up
+            && !member.namespace.is_empty()
+            && self.stable.probe_due(&member.host, now)
+    }
 }
 
-pub fn pool_member_view(member: &PoolMember, aead: bool) -> PoolMemberView {
+pub fn pool_member_view(member: &PoolMember, aead: bool, stable_role: &str) -> PoolMemberView {
     let latency_ms = u64::try_from(member.latency.as_millis())
         .unwrap_or(i64::MAX as u64)
         .min(i64::MAX as u64) as i64;
@@ -791,12 +1273,16 @@ pub fn pool_member_view(member: &PoolMember, aead: bool) -> PoolMemberView {
         latency_ms,
         cooling: member.cooling,
         aead,
+        stable_role: stable_role.to_string(),
     }
 }
 
 /// Projects a pool and resolved member snapshots into the existing UI model.
 /// Panel inbounds can be attached to the returned view by the integration.
 pub fn auto_pool_mode(pool: &Pool, members: &[PoolMember], current: &str) -> &'static str {
+    if pool.mode == POOL_MODE_STABLE {
+        return POOL_MODE_STABLE;
+    }
     if !pool.auto_strategy {
         return canonical_pool_mode(&pool.mode).unwrap_or(POOL_MODE_SINGLE);
     }
@@ -852,12 +1338,23 @@ pub fn pool_view(
     fill_note: Option<&str>,
     aead_hosts: &HashSet<String>,
     effective_mode: &str,
+    stable: Option<&StableState>,
 ) -> PoolView {
     let ui_mode = match canonical_pool_mode(effective_mode) {
         Some(POOL_MODE_BALANCE) => POOL_MODE_LATENCY,
         Some(POOL_MODE_CONCURRENT) => POOL_MODE_RACE,
         _ => effective_mode,
     };
+    let stable_status = stable
+        .map(|state| state.status(members, Instant::now()))
+        .unwrap_or_default();
+    let up = members.iter().filter(|member| member.up).count();
+    let ready = running
+        && if pool.mode == POOL_MODE_STABLE {
+            stable_status.ready
+        } else {
+            up > 0
+        };
     PoolView {
         id: pool.id.clone(),
         identity: pool.identity(),
@@ -869,20 +1366,31 @@ pub fn pool_view(
         rr_step: pool.rr_step,
         port: pool.port,
         running,
-        up: members.iter().filter(|member| member.up).count(),
+        ready,
+        up,
         total: members.len(),
         socks_user: pool.cred.user.clone(),
         socks_pass: pool.cred.pass.clone(),
         cred: pool.cred.clone(),
         members: members
             .iter()
-            .map(|member| pool_member_view(member, aead_hosts.contains(&member.host)))
+            .map(|member| {
+                let role = stable.map(|state| state.role(&member.host)).unwrap_or("");
+                pool_member_view(member, aead_hosts.contains(&member.host), role)
+            })
             .collect(),
         inbounds: Vec::new(),
         auto_fill: pool.auto_fill,
         size: pool.size,
         preferred_countries: pool.preferred_countries.clone(),
         fill_note: fill_note.unwrap_or("").to_string(),
+        stable_phase: stable_status.phase,
+        stable_active: stable_status.active,
+        stable_standby: stable_status.standby,
+        stable_preflight: stable_status.preflight,
+        stable_switch_from: stable_status.switch_from,
+        stable_switch_to: stable_status.switch_to,
+        stable_rollback: stable_status.rollback,
     }
 }
 

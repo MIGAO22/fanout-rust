@@ -172,7 +172,7 @@ impl XUI {
             }
         }
         for pool in &runtime.pools {
-            live.insert(sanitize_tag(&pool_identity(&pool.id)), pool.up > 0);
+            live.insert(sanitize_tag(&pool_identity(&pool.id)), pool.ready);
         }
         live
     }

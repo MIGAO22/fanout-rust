@@ -570,6 +570,19 @@ impl TunnelRuntime for LinuxTunnelRuntime {
         netns_has_default(&self.netns.name())
     }
 
+    async fn local_ready(&self) -> Result<()> {
+        if let Some(reason) = self.dead_reason() {
+            anyhow::bail!("OpenVPN 已退出：{reason}");
+        }
+        if !self.accepting.load(Ordering::Acquire) || self.listener.lock().await.is_none() {
+            anyhow::bail!("SOCKS5 监听未就绪");
+        }
+        if !self.healthy().await {
+            anyhow::bail!("隧道路由或 WARP 握手未就绪");
+        }
+        Ok(())
+    }
+
     async fn guard_transit(&self) -> Result<()> {
         if !self.settings.read().await.warp().enabled {
             return Ok(());

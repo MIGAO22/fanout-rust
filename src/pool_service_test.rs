@@ -232,6 +232,39 @@ async fn new_pools_get_monotonic_ids_generated_credentials_and_validation() {
 }
 
 #[tokio::test]
+async fn stable_pool_persists_and_requires_an_active_before_serving() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = test_manager(dir.path());
+    let service = PoolService::load(dir.path(), manager, PoolStore::new())
+        .await
+        .unwrap();
+    service
+        .set_pool(Pool {
+            name: "稳定组".into(),
+            mode: crate::pools_logic::POOL_MODE_STABLE.into(),
+            hosts: vec!["missing-a".into(), "missing-b".into()],
+            ..Pool::default()
+        })
+        .await
+        .unwrap();
+
+    let view = service.views().await.remove(0);
+    assert_eq!(view.mode, crate::pools_logic::POOL_MODE_STABLE);
+    assert_eq!(view.mode_label, "稳定模式");
+    assert!(!view.ready);
+    assert!(!view.serving());
+    assert!(!service.egress("pool-p1").await.unwrap().ready);
+    assert_eq!(
+        crate::pools_logic::load_pool_store(dir.path())
+            .unwrap()
+            .pools[0]
+            .mode,
+        crate::pools_logic::POOL_MODE_STABLE
+    );
+    service.close().await;
+}
+
+#[tokio::test]
 async fn runtime_selection_covers_affinity_cooldown_latency_and_udp_fallback() {
     let listener = TcpListener::bind(SocketAddr::from((LOOPBACK, 0)))
         .await
@@ -356,6 +389,8 @@ async fn concurrent_dial_returns_the_winner_and_closes_late_sockets() {
                 delay: Duration::from_millis(60),
                 socket: StdMutex::new(Some(slow_socket)),
             })),
+            tunnel: None,
+            generation: 0,
         },
         ResolvedMember {
             member: up_member("fast"),
@@ -363,6 +398,8 @@ async fn concurrent_dial_returns_the_winner_and_closes_late_sockets() {
                 delay: Duration::from_millis(1),
                 socket: StdMutex::new(Some(fast_socket)),
             })),
+            tunnel: None,
+            generation: 0,
         },
     ];
 

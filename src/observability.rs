@@ -477,6 +477,30 @@ mod tests {
     }
 
     #[test]
+    fn traffic_snapshot_reports_rates_and_cumulative_bytes() {
+        let store = ObservabilityStore::default();
+        let traffic = Arc::new(TrafficCounters::default());
+        traffic.add_up(1_000_000);
+        traffic.add_down(2_000_000);
+        store.reset_slot(1, "node-1".into(), 1, traffic.clone());
+
+        let first = store.snapshots().remove(0);
+        assert_eq!(first.traffic_up_bytes, 1_000_000);
+        assert_eq!(first.traffic_down_bytes, 2_000_000);
+        assert_eq!(first.up_bps, 0.0);
+        assert_eq!(first.down_bps, 0.0);
+
+        std::thread::sleep(std::time::Duration::from_millis(550));
+        traffic.add_up(1_000_000);
+        traffic.add_down(2_000_000);
+        let second = store.snapshots().remove(0);
+        assert_eq!(second.traffic_up_bytes, 2_000_000);
+        assert_eq!(second.traffic_down_bytes, 4_000_000);
+        assert!(second.up_bps > 0.0);
+        assert!(second.down_bps > 0.0);
+    }
+
+    #[test]
     fn prometheus_escapes_labels_and_emits_counters() {
         let store = ObservabilityStore::default();
         store.reset_slot(

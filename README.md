@@ -2,7 +2,7 @@
 
 [fanout](https://github.com/MIGAO22/fanout) 的 Rust 全量重构版：把 VPN Gate 的公共 OpenVPN 节点转换成本地 SOCKS5 出口，并可选择叠加 Cloudflare WARP。前端、工作目录和主要操作方式与 Go 版保持兼容。
 
-稳定版：[v1.2.6](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.2.6)
+稳定版：[v1.2.7](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.2.7)
 
 历史测试版：[Releases](https://github.com/MIGAO22/fanout-rust/releases)
 
@@ -15,7 +15,7 @@
 - 可选的 Cloudflare WARP 中转：注册、WireGuard 握手、分流路由和超时自动替换。
 - 出口组：单一出口、轮询出口、负载均衡、并发出口，所有策略均支持原子成员切换，已有 TCP/UDP 连接不中断。
 - 出口组自动补位、首选国家、60% 国家配额、在线出口复用和全局 20 台上限。
-- 实时出口指标：探活延迟、抖动、丢包、SOCKS 吞吐、重连与失败时间线。
+- 实时出口指标：探活延迟、抖动、丢包、SOCKS 吞吐、累计流量、重连与失败时间线。
 - 智能选路：EWMA 质量评分、失败节点隔离、最短驻留、切换冷却和出口组自动策略。
 - WARP 账号池：槽位租约隔离、有界注册队列、后台预热、失败轮换和清理审计。
 - 3x-ui、自建 Xray、xray-cf-lite 三种节点链接后端。
@@ -235,7 +235,8 @@ WARP 开启后，流量路径为：
 
 ## 可观测性
 
-- 出口卡片显示探活延迟、抖动、最近丢包比例、SOCKS 上行/下行速率、重连和失败次数。
+- 在线出口卡片顶部显示绿色流量胶囊：实时上传/下载速率与累计使用流量，悬停可查看上、下行累计明细。
+- 出口卡片显示探活延迟、抖动、最近丢包比例、重连和失败次数。
 - 管理页提供有界健康时间线：默认折叠，标题行显示最新事件，展开后为单行紧凑列表并支持滚动。
 - `GET /metrics` 输出 Prometheus 文本；本机回环地址可直接访问，远程访问需在设置中配置 Bearer 令牌。
 - 设置 `FANOUT_LOG_FORMAT=json` 后，服务日志切换为结构化 JSON。

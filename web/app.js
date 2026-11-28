@@ -208,6 +208,13 @@ function fmtGB(b){
   const g = b / 1073741824;
   return (g >= 10 ? g.toFixed(0) : g.toFixed(1)) + 'G';
 }
+function fmtBytes(b){
+  const n = Math.max(0, num(b));
+  if(n >= 1073741824) return (n / 1073741824).toFixed(n >= 10737418240 ? 0 : 1) + ' GB';
+  if(n >= 1048576) return (n / 1048576).toFixed(n >= 10485760 ? 0 : 1) + ' MB';
+  if(n >= 1024) return (n / 1024).toFixed(n >= 10240 ? 0 : 1) + ' KB';
+  return n.toFixed(0) + ' B';
+}
 
 // 速率按 1024 进制缩写，跟内存/磁盘那几颗胶囊同一套口径，
 // 免得页面上「1G 内存」和「1G 带宽」的 G 不是一个意思。
@@ -488,13 +495,21 @@ function exitCard(e){
   const speed = e.node_speed ? '<span class="it">' + ICON.bolt + num(e.node_speed) + ' Mbps</span>' : '';
   const slot = '<span class="it">#' + e.slot + '</span>';
   const m = e.metrics;
+  const trafficUp = num(m && m.traffic_up_bytes);
+  const trafficDown = num(m && m.traffic_down_bytes);
+  const traffic = st === 'up'
+    ? '<div class="traffic-pill" title="累计上传 ' + esc(fmtBytes(trafficUp))
+      + ' · 下载 ' + esc(fmtBytes(trafficDown)) + '">'
+      + '<span class="dot"></span>'
+      + '<span class="dir">↑</span><span>' + rate(m && m.up_bps) + '</span>'
+      + '<span class="dir">↓</span><span>' + rate(m && m.down_bps) + '</span>'
+      + '<span class="total">累计 ' + fmtBytes(trafficUp + trafficDown) + '</span></div>'
+    : '';
   const metrics = m && m.probe_total
     ? '<div class="meta" title="探活 ' + m.probe_total + ' 次，失败 ' + m.probe_failures + ' 次，重连 ' + m.reconnects + ' 次">'
       + '<span class="it">延迟 ' + (m.latency_ms == null ? '—' : Math.round(m.latency_ms) + ' ms') + '</span>'
       + '<span class="it">抖动 ' + Math.round(m.jitter_ms || 0) + ' ms</span>'
-      + '<span class="it">丢包 ' + (m.loss_ratio * 100).toFixed(1) + '%</span>'
-      + '<span class="it">↑ ' + rate(m.up_bps) + '</span>'
-      + '<span class="it">↓ ' + rate(m.down_bps) + '</span></div>'
+      + '<span class="it">丢包 ' + (m.loss_ratio * 100).toFixed(1) + '%</span></div>'
     : '';
 
   // 标的是节点自己的本事，不是此刻在跑什么算法：VPN Gate 那批节点写死
@@ -519,6 +534,7 @@ function exitCard(e){
     : '';
 
   return '<article class="card ' + st + '">'
+    + traffic
     + '<div class="hd">'
     +   '<span class="orb ' + st + '" title="' + (STATUS[st] || st) + '"></span>'
     +   '<div class="ttl">'

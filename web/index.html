@@ -527,6 +527,29 @@ html[data-theme="dark"] select.inp{background-image:url("data:image/svg+xml;char
   stroke-linecap:round;stroke-linejoin:round}
 .panel .ph .n{font-size:11px;font-weight:600;color:var(--text-3)}
 .panel .pb{padding:5px 15px 13px}
+.timeline-panel{margin-top:6px}
+.timeline-panel>summary{list-style:none;cursor:pointer;user-select:none}
+.timeline-panel>summary::-webkit-details-marker{display:none}
+.timeline-panel>summary::before{content:'›';display:grid;place-items:center;width:14px;height:14px;
+  color:var(--text-3);font-size:16px;line-height:1;transform:rotate(0deg);transition:transform .15s ease}
+.timeline-panel[open]>summary::before{transform:rotate(90deg)}
+.timeline-panel .timeline-title{font-size:13px;font-weight:640}
+.timeline-panel .timeline-latest{min-width:0;max-width:520px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;font-size:11.5px;color:var(--text-3)}
+.timeline-panel .timeline-list{max-height:252px;overflow:auto;overscroll-behavior:contain}
+.timeline-row{display:grid;grid-template-columns:62px 78px 34px minmax(110px,.8fr) minmax(160px,1.4fr);
+  align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11.5px}
+.timeline-row:last-child{border-bottom:0}
+.timeline-row .t-time{font-family:var(--mono);font-size:10.5px;color:var(--text-3);text-align:right}
+.timeline-row .t-slot{font-family:var(--mono);font-size:10.5px;color:var(--text-3)}
+.timeline-row .t-host,.timeline-row .t-reason{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.timeline-row .t-host{font-family:var(--mono);font-size:11px}
+.timeline-row .t-reason{color:var(--text-3)}
+@media(max-width:760px){
+  .timeline-panel .timeline-latest{max-width:42vw}
+  .timeline-row{grid-template-columns:56px 72px 30px minmax(0,1fr)}
+  .timeline-row .t-reason{grid-column:2/-1}
+}
 .orow{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);flex-wrap:wrap}
 .orow:last-child{border-bottom:0}
 .orow .nm{flex:1;min-width:130px;font-size:12.5px;font-weight:550;
@@ -895,15 +918,16 @@ html[data-theme="dark"] .scr{background:rgba(0,0,0,.62)}
 
       <div class="jobs" id="jobs"></div>
 
-      <section class="panel" id="healthPanel">
-        <div class="ph">
-          <h3>健康时间线</h3>
+      <details class="panel timeline-panel" id="healthPanel">
+        <summary class="ph">
+          <span class="timeline-title">健康时间线</span>
           <span class="n" id="timelineCount">0</span>
+          <span class="timeline-latest" id="timelineLatest">暂无健康事件</span>
           <span class="spacer"></span>
-          <span class="hint">失败、恢复、重连与节点切换</span>
-        </div>
-        <div class="pb" id="timelineList"><div class="none">暂无健康事件</div></div>
-      </section>
+          <span class="hint">点击展开</span>
+        </summary>
+        <div class="pb timeline-list" id="timelineList"><div class="none">暂无健康事件</div></div>
+      </details>
 
       <!-- WARP 中转：状态与开关都摆在这儿，每条出口的接入点写在它自己的卡片上 -->
       <section class="wbar" id="wbar">

@@ -2,7 +2,7 @@
 
 [fanout](https://github.com/MIGAO22/fanout) 的 Rust 全量重构版：把 VPN Gate 的公共 OpenVPN 节点转换成本地 SOCKS5 出口，并可选择叠加 Cloudflare WARP。前端、工作目录和主要操作方式与 Go 版保持兼容。
 
-稳定版：[v1.1.0](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.1.0)
+稳定版：[v1.1.1](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.1.1)
 
 历史测试版：[Releases](https://github.com/MIGAO22/fanout-rust/releases)
 
@@ -223,7 +223,7 @@ WARP 开启后，流量路径为：
 ## 可观测性
 
 - 出口卡片显示探活延迟、抖动、最近丢包比例、SOCKS 上行/下行速率、重连和失败次数。
-- 管理页提供有界健康时间线，只记录失败、恢复、重连、节点切换和 WARP 事件。
+- 管理页提供有界健康时间线：默认折叠，标题行显示最新事件，展开后为单行紧凑列表并支持滚动。
 - `GET /metrics` 输出 Prometheus 文本；本机回环地址可直接访问，远程访问需在设置中配置 Bearer 令牌。
 - 设置 `FANOUT_LOG_FORMAT=json` 后，服务日志切换为结构化 JSON。
 

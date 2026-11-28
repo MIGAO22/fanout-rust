@@ -1082,24 +1082,35 @@ const EVENT_LABEL = {
   candidate_failed:'候选失败', candidate_ready:'节点就绪', reconnect_started:'开始重连',
   process_dead:'进程退出', transit_guard_failed:'路由修复失败',
 };
+function clockTime(v){
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? '—' : d.toLocaleTimeString('zh-CN', {
+    hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'
+  });
+}
 async function loadTimeline(){
   if(timelineBusy) return;
   timelineBusy = true;
   try{
     const events = await api('/api/timeline?limit=40') || [];
     const box = $('#timelineList');
+    const latest = events[0];
     $('#timelineCount').textContent = events.length + ' 条';
+    $('#timelineLatest').textContent = latest
+      ? '#' + latest.slot + ' ' + (EVENT_LABEL[latest.kind] || latest.kind)
+        + ' · ' + (latest.host || '—') + ' · ' + (agoFrom(latest.at) || '刚刚')
+      : '暂无健康事件';
     box.innerHTML = events.length ? events.map(ev =>
-      '<div class="orow" style="border:0">'
+      '<div class="timeline-row">'
+      + '<span class="t-time" title="' + esc(ev.at) + '">' + clockTime(ev.at) + '</span>'
       + '<span class="badge ' + (ev.status === 'up' ? 'ok' : ev.status === 'failed' ? 'bad' : 'warn') + '">'
       + esc(EVENT_LABEL[ev.kind] || ev.kind) + '</span>'
-      + '<span class="pt">#' + ev.slot + '</span>'
-      + '<span class="n">' + esc(ev.host || '—') + '</span>'
-      + '<span class="spacer"></span>'
-      + '<span class="hint">' + esc(agoFrom(ev.at) || ev.at) + '</span>'
-      + (ev.reason ? '<div class="hint">' + esc(ev.reason) + '</div>' : '')
+      + '<span class="t-slot">#' + ev.slot + '</span>'
+      + '<span class="t-host" title="' + esc(ev.host || '—') + '">' + esc(ev.host || '—') + '</span>'
+      + '<span class="t-reason" title="' + esc(ev.reason || '—') + '">' + esc(ev.reason || '—') + '</span>'
       + '</div>').join('') : '<div class="none">暂无健康事件</div>';
   }catch(e){
+    $('#timelineLatest').textContent = '读取失败';
     $('#timelineList').innerHTML = '<div class="none">读取失败：' + esc(e.message) + '</div>';
   }finally{ timelineBusy = false; }
 }

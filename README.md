@@ -2,7 +2,7 @@
 
 [fanout](https://github.com/MIGAO22/fanout) 的 Rust 全量重构版：把 VPN Gate 的公共 OpenVPN 节点转换成本地 SOCKS5 出口，并可选择叠加 Cloudflare WARP。前端、工作目录和主要操作方式与 Go 版保持兼容。
 
-稳定版：[v1.2.9](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.2.9)
+稳定版：[v1.2.10](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.2.10)
 
 历史测试版：[Releases](https://github.com/MIGAO22/fanout-rust/releases)
 
@@ -19,7 +19,7 @@
 - 智能选路：EWMA 质量评分、失败节点隔离、最短驻留、切换冷却和出口组自动策略。
 - WARP 账号池：槽位租约隔离、有界注册队列、后台预热、失败轮换和清理审计。
 - 3x-ui、自建 Xray、xray-cf-lite 三种节点链接后端。
-- 内嵌 Web 管理界面、订阅链接、客户端管理、主机负载和自更新。
+- 内嵌 Web 管理界面、订阅链接、客户端管理、主机负载、总流量消耗和自更新。
 - amd64 / arm64 双架构 Release，提供 SHA256 校验和。
 
 ## 架构
@@ -235,9 +235,10 @@ WARP 开启后，流量路径为：
 
 ## 可观测性
 
+- 顶部负载胶囊末尾显示所有出口的累计总流量，悬停可查看上传、下载明细。
 - 正在承载活跃连接的出口卡片顶部显示绿色流量胶囊：实时上传/下载速率与累计使用流量，悬停可查看上、下行累计明细；出口组当前实际使用的成员同步显示，出口组卡片本身不显示。
 - 出口卡片显示探活延迟、抖动、最近丢包比例、重连和失败次数。
-- 管理页提供有界健康时间线：默认折叠，标题行显示最新事件，展开后为单行紧凑列表并支持滚动。
+- 管理页提供有界健康时间线：仅保留最近 24 小时，默认折叠，标题行显示最新事件，展开后为单行紧凑列表并支持滚动。
 - `GET /metrics` 输出 Prometheus 文本；本机回环地址可直接访问，远程访问需在设置中配置 Bearer 令牌。
 - 设置 `FANOUT_LOG_FORMAT=json` 后，服务日志切换为结构化 JSON。
 

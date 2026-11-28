@@ -215,6 +215,16 @@ function fmtBytes(b){
   if(n >= 1024) return (n / 1024).toFixed(n >= 10240 ? 0 : 1) + ' KB';
   return n.toFixed(0) + ' B';
 }
+function trafficTotals(){
+  let up = 0, down = 0;
+  for(const e of view.exits || []){
+    const m = e.metrics;
+    if(!m) continue;
+    up += num(m.traffic_up_bytes);
+    down += num(m.traffic_down_bytes);
+  }
+  return {up, down, total: up + down};
+}
 
 // 速率按 1024 进制缩写，跟内存/磁盘那几颗胶囊同一套口径，
 // 免得页面上「1G 内存」和「1G 带宽」的 G 不是一个意思。
@@ -249,6 +259,7 @@ function ratePill(k, bps, pct, ready, iface, link, dir){
 // 前端不参与任何估算，否则页面和 SSH 里看到的对不上，比不显示更糟。
 function statDefs(s){
   const cap = s.sock_cap || 0;
+  const traffic = trafficTotals();
   return [
     {k:'CPU', pct:s.cpu, v:Math.round(s.cpu) + '%',
      tip:'CPU 占用 ' + s.cpu.toFixed(1) + '%\n两次刷新之间的平均值，全部核心合起来算'},
@@ -283,6 +294,9 @@ function statDefs(s){
         + '：内核把两张表分开记，绑 [::] 的双栈监听只出现在 IPv6 那份里'},
     ratePill('上行', s.up_bps, s.up_pct, s.net_ready, s.net_if || '默认路由网卡', s.link_mbps, 'up'),
     ratePill('下行', s.down_bps, s.down_pct, s.net_ready, s.net_if || '默认路由网卡', s.link_mbps, 'down'),
+    {k:'总流量', v:fmtBytes(traffic.total), plain:true,
+     tip:'所有出口本次运行的累计上传 + 下载\n上传 ' + fmtBytes(traffic.up)
+        + '\n下载 ' + fmtBytes(traffic.down)},
   ];
 }
 
@@ -290,12 +304,13 @@ function renderStats(s){
   $('#stats').innerHTML = statDefs(s).map(d => {
     const pct = Math.max(0, Math.min(100, d.pct || 0));
     const lvl = d.off ? ' off' : (pct >= 90 ? ' over' : (pct >= 75 ? ' hot' : ''));
+    const cls = d.plain ? ' plain' : '';
     // title 里的换行要转成实体：HTML 解析器会把属性值里的裸换行折成一个空格，
     // 那样两行说明就糊成一行长文本了。
     const tip = esc(d.tip).replace(/\n/g, '&#10;');
-    return '<span class="stat' + lvl + '" title="' + tip + '">'
+    return '<span class="stat' + lvl + cls + '" title="' + tip + '">'
       + '<span class="k">' + esc(d.k) + '</span>'
-      + '<span class="bar"><i style="width:' + pct.toFixed(1) + '%"></i></span>'
+      + (d.plain ? '' : '<span class="bar"><i style="width:' + pct.toFixed(1) + '%"></i></span>')
       + '<span class="v">' + esc(d.v) + '</span></span>';
   }).join('');
 }

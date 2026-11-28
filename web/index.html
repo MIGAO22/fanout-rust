@@ -208,6 +208,7 @@ a:hover{text-decoration:underline}
 .stat .bar i{position:absolute;left:0;top:0;bottom:0;width:0;border-radius:var(--r-full);
   background:var(--ok);transition:width var(--t),background var(--t)}
 .stat .v{font:600 11.5px/1 var(--mono);color:var(--text-2)}
+.stat.plain .v{color:var(--ok);font-weight:650}
 /* 阈值上色：绿是常态，黄了该看一眼，红了就是这台机器在打满 */
 .stat.hot .bar i{background:var(--warn)}
 .stat.over .bar i{background:var(--bad)}

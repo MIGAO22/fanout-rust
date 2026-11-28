@@ -351,9 +351,15 @@ impl ObservabilityStore {
         });
     }
 
+    fn prune_timeline(timeline: &mut VecDeque<TimelineEvent>, now: DateTime<Utc>) {
+        let cutoff = now - chrono::Duration::hours(24);
+        timeline.retain(|event| event.at >= cutoff);
+    }
+
     fn push_event(&self, event: TimelineEvent) {
         let mut timeline = self.lock_timeline();
         timeline.push_front(event);
+        Self::prune_timeline(&mut timeline, Utc::now());
         timeline.truncate(TIMELINE_LIMIT);
     }
 
@@ -366,7 +372,9 @@ impl ObservabilityStore {
 
     pub fn timeline(&self, slot: Option<usize>, limit: usize) -> Vec<TimelineEvent> {
         let limit = limit.clamp(1, TIMELINE_LIMIT);
-        self.lock_timeline()
+        let mut timeline = self.lock_timeline();
+        Self::prune_timeline(&mut timeline, Utc::now());
+        timeline
             .iter()
             .filter(|event| slot.is_none_or(|wanted| event.slot == wanted))
             .take(limit)
@@ -493,6 +501,32 @@ mod tests {
         store.record_probe(1, "new".into(), 2, false, None, "stale");
         assert_eq!(store.snapshots()[0].probe_total, 0);
         assert_eq!(store.snapshots()[0].host, "old");
+    }
+
+    #[test]
+    fn timeline_prunes_events_older_than_24_hours() {
+        let store = ObservabilityStore::default();
+        let now = Utc::now();
+        let event = |at, kind| TimelineEvent {
+            at,
+            slot: 1,
+            host: "node-1".into(),
+            generation: 1,
+            kind: kind.into(),
+            status: "up".into(),
+            reason: String::new(),
+            latency_ms: None,
+        };
+        {
+            let mut timeline = store.lock_timeline();
+            timeline.push_back(event(now - chrono::Duration::hours(25), "old"));
+            timeline.push_back(event(now - chrono::Duration::hours(23), "recent"));
+        }
+
+        let events = store.timeline(None, 10);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "recent");
+        assert_eq!(store.lock_timeline().len(), 1);
     }
 
     #[test]

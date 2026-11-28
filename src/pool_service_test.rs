@@ -312,8 +312,7 @@ async fn changing_existing_pool_to_stable_reconfigures_runtime_policy() {
     let run = service.run_of("p1").unwrap();
     assert_eq!(run.current_mode(), crate::pools_logic::POOL_MODE_STABLE);
     assert_eq!(run.step.load(std::sync::atomic::Ordering::Relaxed), 7);
-    assert!(lock_unpoisoned(&run.runtime)
-        .stable_probe_due(&up_member("missing-a"), Instant::now()));
+    assert!(lock_unpoisoned(&run.runtime).stable_probe_due(&up_member("missing-a"), Instant::now()));
     service.close().await;
 }
 

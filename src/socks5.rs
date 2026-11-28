@@ -152,9 +152,9 @@ impl DialGuard {
         }
     }
 
-    pub fn combine(mut self, other: Self) -> Self {
-        self.releases.extend(other.releases);
-        self.traffic.extend(other.traffic);
+    pub fn combine(mut self, mut other: Self) -> Self {
+        self.releases.append(&mut other.releases);
+        self.traffic.append(&mut other.traffic);
         self
     }
 

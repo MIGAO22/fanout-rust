@@ -72,7 +72,7 @@ pub struct WarpSettings {
     pub pool: WarpPoolSettings,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WarpPoolSettings {
     pub enabled: bool,
@@ -80,6 +80,18 @@ pub struct WarpPoolSettings {
     pub size: usize,
     pub prewarm_ttl_secs: u64,
     pub rotate_after_failures: u32,
+}
+
+impl Default for WarpPoolSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prewarm: false,
+            size: 4,
+            prewarm_ttl_secs: 1800,
+            rotate_after_failures: 3,
+        }
+    }
 }
 
 impl WarpPoolSettings {

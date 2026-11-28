@@ -44,6 +44,22 @@ async fn counted_relay_direction_tracks_payload_bytes() {
     }
 }
 
+#[test]
+fn counted_dial_guard_tracks_active_connections() {
+    let traffic = Arc::new(TrafficCounters::default());
+    let released = Arc::new(AtomicBool::new(false));
+    let route_released = Arc::clone(&released);
+    {
+        let guard = DialGuard::counted(Arc::clone(&traffic)).combine(DialGuard::new(move || {
+            route_released.store(true, Ordering::SeqCst)
+        }));
+        assert_eq!(traffic.active_connections(), 1);
+        assert!(Arc::ptr_eq(&guard.traffic().unwrap(), &traffic));
+    }
+    assert_eq!(traffic.active_connections(), 0);
+    assert!(released.load(Ordering::SeqCst));
+}
+
 #[tokio::test]
 async fn parses_ipv4_connect_request() {
     let bytes = [5, CMD_CONNECT, 0, ATYP_IPV4, 8, 8, 8, 8, 0x01, 0xbb];

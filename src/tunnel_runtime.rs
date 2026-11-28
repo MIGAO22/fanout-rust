@@ -29,7 +29,7 @@ use crate::{
         openvpn_paths, output_command, ovpn_log_hint, ovpn_tuning, spawn_openvpn_in_netns, OvpnProc,
     },
     runtime::{TunnelFactory, TunnelRuntime},
-    socks5::{DialNetwork, DialSocket, SocksDialer},
+    socks5::{DialGuard, DialNetwork, DialSocket, SocksDialer},
     util::{one_line, write_file},
     warp_logic::{
         warp_budget, warp_exit_is_transit_only, warp_gate_ips, warp_gate_names, warp_openvpn_args,
@@ -187,6 +187,7 @@ fn lock_unpoisoned<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 pub struct NetnsSocksDialer {
     dialer: NetnsDialer,
+    traffic: Arc<TrafficCounters>,
 }
 
 #[async_trait]
@@ -213,6 +214,15 @@ impl SocksDialer for NetnsSocksDialer {
             }
         }
         Err(last_error.unwrap_or_else(|| anyhow!("目标 {addr} 没有 IPv4 地址")))
+    }
+
+    async fn dial_guarded(
+        &self,
+        network: DialNetwork,
+        addr: &str,
+    ) -> Result<(DialSocket, DialGuard)> {
+        let socket = self.dial(network, addr).await?;
+        Ok((socket, DialGuard::counted(Arc::clone(&self.traffic))))
     }
 }
 
@@ -316,9 +326,9 @@ impl LinuxTunnelRuntime {
         let ns = self.netns.name();
         let dialer = Arc::new(NetnsSocksDialer {
             dialer: NetnsDialer::new(ns),
+            traffic: self.traffic.clone(),
         });
         let cred = self.cred.clone();
-        let traffic = self.traffic.clone();
         let accepting = Arc::new(AtomicBool::new(true));
         self.accepting.store(true, Ordering::Release);
         let stop = self.stop.lock().await.clone();
@@ -335,10 +345,9 @@ impl LinuxTunnelRuntime {
                                 let c = cred.read().await.clone();
                                 let d = dialer.clone();
                                 let stop = stop.clone();
-                                let traffic = traffic.clone();
                                 tokio::spawn(async move {
                                     tokio::select! {
-                                        _ = crate::socks5::serve_socks_counted(stream, Some(&c), d.as_ref(), traffic) => {}
+                                        _ = crate::socks5::serve_socks(stream, Some(&c), d.as_ref()) => {}
                                         _ = stop.cancelled() => {}
                                     }
                                 });
@@ -555,6 +564,7 @@ impl TunnelRuntime for LinuxTunnelRuntime {
             .get_or_init(|| {
                 Arc::new(NetnsSocksDialer {
                     dialer: NetnsDialer::new(self.netns.name()),
+                    traffic: self.traffic.clone(),
                 })
             })
             .clone()

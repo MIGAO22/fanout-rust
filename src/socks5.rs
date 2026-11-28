@@ -124,22 +124,52 @@ pub enum DialSocket {
 
 pub type DialError = AnyhowError;
 
-pub struct DialGuard(Option<Box<dyn FnOnce() + Send + Sync>>);
+pub struct DialGuard {
+    releases: Vec<Box<dyn FnOnce() + Send + Sync>>,
+    traffic: Vec<Arc<TrafficCounters>>,
+}
 
 impl DialGuard {
     pub fn new(release: impl FnOnce() + Send + Sync + 'static) -> Self {
-        Self(Some(Box::new(release)))
+        Self {
+            releases: vec![Box::new(release)],
+            traffic: Vec::new(),
+        }
+    }
+
+    pub fn counted(traffic: Arc<TrafficCounters>) -> Self {
+        traffic.enter();
+        Self {
+            releases: Vec::new(),
+            traffic: vec![traffic],
+        }
     }
 
     pub fn none() -> Self {
-        Self(None)
+        Self {
+            releases: Vec::new(),
+            traffic: Vec::new(),
+        }
+    }
+
+    pub fn combine(mut self, other: Self) -> Self {
+        self.releases.extend(other.releases);
+        self.traffic.extend(other.traffic);
+        self
+    }
+
+    pub fn traffic(&self) -> Option<Arc<TrafficCounters>> {
+        self.traffic.first().cloned()
     }
 }
 
 impl Drop for DialGuard {
     fn drop(&mut self) {
-        if let Some(release) = self.0.take() {
+        for release in self.releases.drain(..) {
             release();
+        }
+        for traffic in self.traffic.drain(..) {
+            traffic.leave();
         }
     }
 }
@@ -178,26 +208,13 @@ pub async fn serve_socks<D>(
 where
     D: SocksDialer + ?Sized,
 {
-    serve_socks_inner(client, cred, dial, None).await
-}
-
-pub async fn serve_socks_counted<D>(
-    client: TcpStream,
-    cred: Option<&SocksCred>,
-    dial: &D,
-    traffic: Arc<TrafficCounters>,
-) -> Result<(), SocksError>
-where
-    D: SocksDialer + ?Sized,
-{
-    serve_socks_inner(client, cred, dial, Some(traffic)).await
+    serve_socks_inner(client, cred, dial).await
 }
 
 async fn serve_socks_inner<D>(
     mut client: TcpStream,
     cred: Option<&SocksCred>,
     dial: &D,
-    traffic: Option<Arc<TrafficCounters>>,
 ) -> Result<(), SocksError>
 where
     D: SocksDialer + ?Sized,
@@ -229,10 +246,10 @@ where
 
     if cmd == CMD_UDP_ASSOCIATE {
         // Unlike CONNECT, UDP ASSOCIATE has no overall control-connection timeout.
-        return serve_udp_associate_inner(client, dial, &addr, traffic).await;
+        return serve_udp_associate_inner(client, dial, &addr).await;
     }
 
-    let (remote, _guard) =
+    let (remote, guard) =
         match timeout_at(deadline, dial.dial_guarded(DialNetwork::Tcp, &addr)).await {
             Ok(Ok((DialSocket::Tcp(stream), guard))) => (stream, guard),
             Ok(Ok((DialSocket::Udp(_), _))) => {
@@ -256,7 +273,7 @@ where
         Err(_) => return Err(timeout_error()),
     }
 
-    match traffic {
+    match guard.traffic() {
         Some(traffic) => relay_counted(client, remote, traffic)
             .await
             .map_err(SocksError::from),
@@ -542,6 +559,7 @@ struct UdpSession {
     atyp: u8,
     addr: Vec<u8>,
     port: u16,
+    traffic: Option<Arc<TrafficCounters>>,
     _guard: DialGuard,
 }
 
@@ -580,14 +598,13 @@ pub async fn serve_udp_associate<D>(
 where
     D: SocksDialer + ?Sized,
 {
-    serve_udp_associate_inner(client, dial, requested_endpoint, None).await
+    serve_udp_associate_inner(client, dial, requested_endpoint).await
 }
 
 async fn serve_udp_associate_inner<D>(
     mut client: TcpStream,
     dial: &D,
     requested_endpoint: &str,
-    traffic: Option<Arc<TrafficCounters>>,
 ) -> Result<(), SocksError>
 where
     D: SocksDialer + ?Sized,
@@ -687,12 +704,14 @@ where
                 Ok((DialSocket::Udp(socket), guard)) => (socket, guard),
                 _ => continue,
             };
+            let traffic = guard.traffic();
             let candidate = Arc::new(UdpSession {
                 socket,
                 client: src,
                 atyp: request.atyp,
                 addr: request.addr,
                 port: request.port,
+                traffic,
                 _guard: guard,
             });
             let mut guard = sessions.lock().await;
@@ -708,7 +727,6 @@ where
                     Arc::clone(&relay),
                     Arc::clone(&sessions),
                     key,
-                    traffic.clone(),
                 ));
                 candidate
             }
@@ -716,7 +734,7 @@ where
 
         // A failed send is left to the per-session reader's idle cleanup.
         if session.socket.send(&request.payload).await.is_ok() {
-            if let Some(traffic) = traffic.as_ref() {
+            if let Some(traffic) = session.traffic.as_ref() {
                 traffic.add_up(request.payload.len());
             }
         }
@@ -733,7 +751,6 @@ async fn relay_udp(
     relay: Arc<UdpSocket>,
     sessions: SessionMap,
     key: String,
-    traffic: Option<Arc<TrafficCounters>>,
 ) {
     let mut buf = vec![0u8; 65_535];
     loop {
@@ -746,7 +763,7 @@ async fn relay_udp(
         if relay.send_to(&packet, session.client).await.is_err() {
             break;
         }
-        if let Some(traffic) = traffic.as_ref() {
+        if let Some(traffic) = session.traffic.as_ref() {
             traffic.add_down(len);
         }
     }

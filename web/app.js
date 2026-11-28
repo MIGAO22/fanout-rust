@@ -497,7 +497,7 @@ function exitCard(e){
   const m = e.metrics;
   const trafficUp = num(m && m.traffic_up_bytes);
   const trafficDown = num(m && m.traffic_down_bytes);
-  const traffic = st === 'up'
+  const traffic = st === 'up' && m && num(m.active_connections) > 0
     ? '<div class="traffic-pill" title="累计上传 ' + esc(fmtBytes(trafficUp))
       + ' · 下载 ' + esc(fmtBytes(trafficDown)) + '">'
       + '<span class="dot"></span>'

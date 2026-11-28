@@ -1003,7 +1003,7 @@ impl PoolService {
         addr: &str,
         target: &str,
         members: Vec<ResolvedMember>,
-    ) -> Result<(DialSocket, String)> {
+    ) -> Result<(DialSocket, String, DialGuard)> {
         let mut policy_members: Vec<PoolMember> =
             members.iter().map(|member| member.member.clone()).collect();
         run.apply_target_state(target, &mut policy_members);
@@ -1091,12 +1091,12 @@ impl PoolService {
             run: run.clone(),
             lease,
         };
-        let outcome = dial_candidate(member, network, addr).await;
+        let outcome = dial_candidate_guarded(member, network, addr, DialGuard::none()).await;
         match outcome.result {
             Ok(socket) => {
                 run.note_success(target, &host, outcome.elapsed);
                 run.stable_note_dial_success(target, &host, outcome.elapsed);
-                Ok((socket, host))
+                Ok((socket, host, outcome.guard.unwrap_or_else(DialGuard::none)))
             }
             Err(error) => {
                 run.stable_note_dial_failure(&host, is_path_failure(&error));
@@ -1149,10 +1149,10 @@ impl PoolService {
             let mode = auto_pool_mode(&pool, &policy_members, &current_mode).to_string();
             if mode == POOL_MODE_STABLE {
                 drop(route_guard);
-                let (socket, host) = self
+                let (socket, host, guard) = self
                     .stable_dial(&run, network, addr, &target, members)
                     .await?;
-                return Ok((socket, host, DialGuard::none()));
+                return Ok((socket, host, guard));
             }
             let choice = run.choose_with_mode(
                 &target,
@@ -2067,14 +2067,6 @@ fn is_path_failure(error: &anyhow::Error) -> bool {
     })
 }
 
-async fn dial_candidate(
-    member: &ResolvedMember,
-    network: DialNetwork,
-    addr: &str,
-) -> AttemptOutcome {
-    dial_candidate_inner(member, network, addr, None).await
-}
-
 async fn dial_candidate_guarded(
     member: &ResolvedMember,
     network: DialNetwork,
@@ -2088,7 +2080,7 @@ async fn dial_candidate_inner(
     member: &ResolvedMember,
     network: DialNetwork,
     addr: &str,
-    guard: Option<DialGuard>,
+    mut guard: Option<DialGuard>,
 ) -> AttemptOutcome {
     let started = Instant::now();
     let host = member.member.host.clone();
@@ -2097,9 +2089,13 @@ async fn dial_candidate_inner(
             .dialer
             .as_ref()
             .ok_or_else(|| anyhow!("成员没有可用拨号器"))?;
-        let socket = timeout(POOL_TRY_TIMEOUT, dialer.dial(network, addr))
+        let (socket, traffic_guard) = timeout(POOL_TRY_TIMEOUT, dialer.dial_guarded(network, addr))
             .await
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "拨号超时"))??;
+        guard = Some(match guard.take() {
+            Some(route_guard) => route_guard.combine(traffic_guard),
+            None => traffic_guard,
+        });
         let matches = match (&socket, network) {
             (DialSocket::Tcp(_), DialNetwork::Tcp) | (DialSocket::Udp(_), DialNetwork::Udp) => true,
             _ => false,

@@ -16,6 +16,7 @@ const LOSS_WINDOW: usize = 20;
 pub struct TrafficCounters {
     up: AtomicU64,
     down: AtomicU64,
+    active: AtomicU64,
 }
 
 impl TrafficCounters {
@@ -25,6 +26,22 @@ impl TrafficCounters {
 
     pub fn add_down(&self, bytes: usize) {
         self.down.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    pub fn enter(&self) {
+        self.active.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn leave(&self) {
+        self.active
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
+                active.checked_sub(1)
+            })
+            .ok();
+    }
+
+    pub fn active_connections(&self) -> u64 {
+        self.active.load(Ordering::Relaxed)
     }
 
     pub fn snapshot(&self) -> (u64, u64) {
@@ -62,6 +79,7 @@ pub struct ExitMetricsSnapshot {
     pub last_probe: Option<DateTime<Utc>>,
     pub traffic_up_bytes: u64,
     pub traffic_down_bytes: u64,
+    pub active_connections: u64,
     pub up_bps: f64,
     pub down_bps: f64,
 }
@@ -160,6 +178,7 @@ impl ExitMetrics {
             last_probe: self.last_probe,
             traffic_up_bytes: up,
             traffic_down_bytes: down,
+            active_connections: self.traffic.active_connections(),
             up_bps: self.up_bps,
             down_bps: self.down_bps,
         }
@@ -482,20 +501,24 @@ mod tests {
         let traffic = Arc::new(TrafficCounters::default());
         traffic.add_up(1_000_000);
         traffic.add_down(2_000_000);
+        traffic.enter();
         store.reset_slot(1, "node-1".into(), 1, traffic.clone());
 
         let first = store.snapshots().remove(0);
         assert_eq!(first.traffic_up_bytes, 1_000_000);
         assert_eq!(first.traffic_down_bytes, 2_000_000);
+        assert_eq!(first.active_connections, 1);
         assert_eq!(first.up_bps, 0.0);
         assert_eq!(first.down_bps, 0.0);
 
         std::thread::sleep(std::time::Duration::from_millis(550));
         traffic.add_up(1_000_000);
         traffic.add_down(2_000_000);
+        traffic.leave();
         let second = store.snapshots().remove(0);
         assert_eq!(second.traffic_up_bytes, 2_000_000);
         assert_eq!(second.traffic_down_bytes, 4_000_000);
+        assert_eq!(second.active_connections, 0);
         assert!(second.up_bps > 0.0);
         assert!(second.down_bps > 0.0);
     }

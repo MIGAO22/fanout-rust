@@ -79,6 +79,7 @@ fn pool(identity: &str, port: u16, running: bool, up: usize) -> PoolView {
         identity: identity.into(),
         port,
         running,
+        ready: running && up > 0,
         up,
         total: up,
         cred: SocksCred {

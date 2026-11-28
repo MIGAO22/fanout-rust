@@ -904,11 +904,10 @@ impl PoolService {
         member: &ResolvedMember,
         membership_epoch: u64,
     ) -> Result<Duration> {
-        let started = Instant::now();
         let latency = self.stable_light_probe(member).await?;
         self.stable_strong_verify(run, member, membership_epoch)
             .await?;
-        Ok(started.elapsed())
+        Ok(latency)
     }
 
     async fn stable_dial(

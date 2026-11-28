@@ -1131,6 +1131,35 @@ fn stable_dial_success_smooths_faster_samples_without_underflow() {
 }
 
 #[test]
+fn stable_background_promotes_a_fresh_verified_member_without_dial() {
+    let now = Instant::now();
+    let members = [
+        up_member("a", Duration::from_millis(50)),
+        up_member("b", Duration::from_millis(40)),
+        up_member("c", Duration::from_millis(60)),
+        up_member("d", Duration::from_millis(70)),
+        up_member("e", Duration::from_millis(80)),
+    ];
+    let mut state = StableState::default();
+    state.reconcile(&members, now);
+
+    assert!(state.begin_probe("b", now));
+    state.finish_probe("b", true, Duration::from_millis(40), now);
+    assert!(state.begin_probe("b", now));
+    state.finish_probe("b", true, Duration::from_millis(40), now);
+    assert!(!state.promote_verified("b", &members, now));
+
+    state.mark_verified("a", Duration::from_millis(50), now);
+    assert!(!state.promote_verified("a", &members, now + Duration::from_secs(31)));
+    assert!(state.promote_verified("a", &members, now));
+    let status = state.status(&members, now);
+    assert_eq!(status.active, "a");
+    assert!(status.ready);
+    assert_eq!(status.standby, 4);
+    assert!(!state.promote_verified("b", &members, now));
+}
+
+#[test]
 fn stable_membership_changes_keep_inflight_route_leases() {
     let now = Instant::now();
     let members = [

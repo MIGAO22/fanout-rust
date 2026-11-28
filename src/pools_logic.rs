@@ -987,6 +987,24 @@ impl StableState {
         true
     }
 
+    pub fn promote_verified(&mut self, host: &str, members: &[PoolMember], now: Instant) -> bool {
+        if self.active.is_some()
+            || self.transition.is_some()
+            || !self.eligible(members, host)
+            || !self.strong_fresh(host, now)
+        {
+            return false;
+        }
+        if !self.begin_transition(host.to_string(), now) {
+            return false;
+        }
+        if self.commit(host, members, now) {
+            return true;
+        }
+        self.abort_transition(members, now);
+        false
+    }
+
     pub fn rollback(&mut self, members: &[PoolMember], now: Instant) -> bool {
         if !matches!(self.phase, StablePhase::Observing | StablePhase::Rollback) {
             return false;

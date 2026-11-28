@@ -355,6 +355,12 @@ impl PoolRun {
             .commit(candidate, members, Instant::now())
     }
 
+    fn stable_promote_verified(&self, host: &str, members: &[PoolMember]) -> bool {
+        lock_unpoisoned(&self.runtime)
+            .stable
+            .promote_verified(host, members, Instant::now())
+    }
+
     fn stable_note_dial_success(&self, target: &str, host: &str, latency: Duration) {
         lock_unpoisoned(&self.runtime).stable.note_dial_success(
             target,
@@ -903,6 +909,25 @@ impl PoolService {
         Ok(())
     }
 
+    async fn stable_promote_verified(
+        &self,
+        run: &Arc<PoolRun>,
+        member: &ResolvedMember,
+        members: &[PoolMember],
+        membership_epoch: u64,
+    ) {
+        if run.membership_epoch() != membership_epoch || !self.member_current(member).await {
+            return;
+        }
+        let host = member.member.host.clone();
+        let _switch = run.stable_switch.lock().await;
+        if run.membership_epoch() != membership_epoch || !self.member_current(member).await {
+            return;
+        }
+        run.stable_reconcile(members);
+        run.stable_promote_verified(&host, members);
+    }
+
     async fn stable_preflight(
         &self,
         run: &PoolRun,
@@ -1152,6 +1177,7 @@ impl PoolService {
                 let runtime = Arc::clone(&run.runtime);
                 let run_for_probe = Arc::clone(&run);
                 let membership_epoch = run.membership_epoch();
+                let probe_members = policy_members.clone();
                 let dialer = Arc::clone(dialer);
                 let host = member.member.host.clone();
                 let shutdown = self.inner.shutdown.clone();
@@ -1193,9 +1219,21 @@ impl PoolService {
                                                 )
                                                 .await
                                             {
-                                                Ok(()) => lock_unpoisoned(&runtime)
-                                                    .stable
-                                                    .mark_verified(&host, latency, Instant::now()),
+                                                Ok(()) => {
+                                                    lock_unpoisoned(&runtime).stable.mark_verified(
+                                                        &host,
+                                                        latency,
+                                                        Instant::now(),
+                                                    );
+                                                    service
+                                                        .stable_promote_verified(
+                                                            &run_for_probe,
+                                                            &member,
+                                                            &probe_members,
+                                                            membership_epoch,
+                                                        )
+                                                        .await;
+                                                }
                                                 Err(error) => {
                                                     debug!("稳定模式强预检 {host} 失败: {error}");
                                                     lock_unpoisoned(&runtime).stable.finish_probe(

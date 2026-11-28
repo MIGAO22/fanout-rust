@@ -1100,6 +1100,28 @@ fn stable_mode_requires_verified_switch_and_preserves_inflight_leases() {
 }
 
 #[test]
+fn stable_membership_changes_keep_inflight_route_leases() {
+    let now = Instant::now();
+    let members = [
+        up_member("a", Duration::ZERO),
+        up_member("b", Duration::ZERO),
+    ];
+    let mut state = StableState::default();
+    state.reconcile(&members, now);
+    assert!(state.begin_transition("a".into(), now));
+    state.mark_verified("a", Duration::ZERO, now);
+    assert!(state.commit("a", &members, now));
+    let lease = state.acquire_lease(&members).unwrap();
+
+    state.reconcile(&members[..1], now);
+    assert!(state.pinned("a", now));
+    state.reset();
+    assert!(state.pinned("a", now));
+    state.release_lease(&lease);
+    assert!(!state.pinned("a", now));
+}
+
+#[test]
 fn stable_mode_is_explicit_and_never_falls_through_to_round_robin() {
     let pool = Pool {
         mode: POOL_MODE_STABLE.into(),

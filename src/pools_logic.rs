@@ -734,7 +734,6 @@ impl StableState {
         let hosts: HashSet<&str> = members.iter().map(|member| member.host.as_str()).collect();
         self.health.retain(|host, _| hosts.contains(host.as_str()));
         self.inflight.retain(|host| hosts.contains(host.as_str()));
-        self.leases.retain(|host, _| hosts.contains(host.as_str()));
         if self
             .active
             .as_deref()
@@ -1049,7 +1048,9 @@ impl StableState {
     }
 
     pub fn reset(&mut self) {
+        let leases = std::mem::take(&mut self.leases);
         *self = Self::default();
+        self.leases = leases;
     }
 }
 

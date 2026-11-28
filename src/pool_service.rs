@@ -1144,6 +1144,7 @@ impl PoolService {
 
                 let runtime = Arc::clone(&run.runtime);
                 let run_for_probe = Arc::clone(&run);
+                let membership_epoch = run.membership_epoch();
                 let dialer = Arc::clone(dialer);
                 let host = member.member.host.clone();
                 let shutdown = self.inner.shutdown.clone();
@@ -1159,6 +1160,8 @@ impl PoolService {
                                 _ = shutdown.cancelled() => None,
                                 result = service.stable_light_probe(&member) => Some(result),
                             };
+                            let attempt = attempt
+                                .filter(|_| run_for_probe.membership_epoch() == membership_epoch);
                             if let Some(result) = attempt {
                                 match result {
                                     Ok(latency) => {

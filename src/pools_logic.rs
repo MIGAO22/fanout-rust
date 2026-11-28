@@ -286,6 +286,7 @@ struct StoredPool {
     auto_fill: Option<bool>,
     size: Option<i64>,
     preferred_countries: Option<Vec<String>>,
+    auto_strategy: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -324,6 +325,7 @@ impl From<StoredPool> for Pool {
             auto_fill: stored.auto_fill.unwrap_or(false),
             size: go_usize(stored.size),
             preferred_countries: stored.preferred_countries.unwrap_or_default(),
+            auto_strategy: stored.auto_strategy.unwrap_or(false),
         };
         pool.normalize();
         pool
@@ -794,23 +796,74 @@ pub fn pool_member_view(member: &PoolMember, aead: bool) -> PoolMemberView {
 
 /// Projects a pool and resolved member snapshots into the existing UI model.
 /// Panel inbounds can be attached to the returned view by the integration.
+pub fn auto_pool_mode(pool: &Pool, members: &[PoolMember], current: &str) -> &'static str {
+    if !pool.auto_strategy {
+        return canonical_pool_mode(&pool.mode).unwrap_or(POOL_MODE_SINGLE);
+    }
+    let up: Vec<_> = members.iter().filter(|member| member.up).collect();
+    if up.len() <= 1 {
+        return POOL_MODE_SINGLE;
+    }
+    let measured: Vec<_> = up
+        .iter()
+        .filter_map(|member| (!member.latency.is_zero()).then_some(member.latency))
+        .collect();
+    let unknown = 1.0 - measured.len() as f64 / up.len() as f64;
+    let spread = if measured.is_empty() {
+        1.0
+    } else {
+        let best = measured.iter().min().copied().unwrap_or_default();
+        let worst = measured.iter().max().copied().unwrap_or_default();
+        ((worst.saturating_sub(best)).as_millis() as f64 / 300.0).clamp(0.0, 1.0)
+    };
+    let cooling = up.iter().filter(|member| member.cooling).count() as f64 / up.len() as f64;
+    let current = canonical_pool_mode(current).unwrap_or(POOL_MODE_SINGLE);
+    let mut scores = [
+        (POOL_MODE_SINGLE, 0.35 - spread * 0.2 - cooling * 0.3),
+        (
+            POOL_MODE_ROUND_ROBIN,
+            0.45 + (1.0 - spread) * 0.35 - cooling * 0.4 - unknown * 0.1,
+        ),
+        (
+            POOL_MODE_BALANCE,
+            0.45 + spread * 0.35 - cooling * 0.25 - unknown * 0.05,
+        ),
+        (
+            POOL_MODE_CONCURRENT,
+            0.25 + cooling * 0.65 + spread * 0.2 + unknown * 0.1,
+        ),
+    ];
+    for (mode, score) in &mut scores {
+        if *mode == current {
+            *score += 0.12;
+        }
+    }
+    scores
+        .into_iter()
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(mode, _)| mode)
+        .unwrap_or(POOL_MODE_SINGLE)
+}
+
 pub fn pool_view(
     pool: &Pool,
     members: &[PoolMember],
     running: bool,
     fill_note: Option<&str>,
     aead_hosts: &HashSet<String>,
+    effective_mode: &str,
 ) -> PoolView {
-    let ui_mode = match canonical_pool_mode(&pool.mode) {
+    let ui_mode = match canonical_pool_mode(effective_mode) {
         Some(POOL_MODE_BALANCE) => POOL_MODE_LATENCY,
         Some(POOL_MODE_CONCURRENT) => POOL_MODE_RACE,
-        _ => pool.mode.as_str(),
+        _ => effective_mode,
     };
     PoolView {
         id: pool.id.clone(),
         identity: pool.identity(),
         name: pool.name.clone(),
         mode: pool.mode.clone(),
+        effective_mode: ui_mode.to_string(),
         mode_label: models::pool_mode_label(ui_mode).to_string(),
         mode_desc: models::pool_mode_desc(ui_mode).to_string(),
         rr_step: pool.rr_step,

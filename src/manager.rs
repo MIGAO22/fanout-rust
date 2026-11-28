@@ -15,8 +15,13 @@ use crate::{
     config::WebSettings,
     jobs::{JobHandle, JobStore},
     models::{Exit, Node, PersistedTunnel, RegionStat, SocksCred, TunnelState, MAX_EXITS},
+    node_health::NodeHealthStore,
     nodecache::NodeCache,
-    nodes::{country_label, fetch_nodes_via_socks, new_socks_cred, node_label, order_candidates},
+    nodes::{
+        country_label, fetch_nodes_via_socks, new_socks_cred, node_label, node_score,
+        order_candidates, order_candidates_scored,
+    },
+    observability::ObservabilityStore,
     panel::Panel,
     pool_service::PoolService,
     runtime::{TunnelFactory, TunnelRuntime},
@@ -34,6 +39,8 @@ pub struct TunnelInner {
     pub prev_host: Option<String>,
     pub avoid: Vec<String>,
     pub failed_since: Option<Instant>,
+    pub up_since: Option<Instant>,
+    pub last_switch_at: Option<Instant>,
 }
 
 pub struct Tunnel {
@@ -68,6 +75,8 @@ impl Tunnel {
                 prev_host: None,
                 avoid: Vec::new(),
                 failed_since: None,
+                up_since: None,
+                last_switch_at: None,
             }),
             generation: AtomicU64::new(0),
             run_lock: Mutex::new(()),
@@ -144,6 +153,9 @@ impl Tunnel {
         };
         if status == "up" {
             i.since = Utc::now();
+            i.up_since = Some(Instant::now());
+        } else {
+            i.up_since = None;
         }
     }
 
@@ -154,6 +166,7 @@ impl Tunnel {
         i.err.clear();
         i.avoid.clear();
         i.failed_since = None;
+        i.up_since = Some(Instant::now());
         i.since = Utc::now();
     }
 
@@ -176,6 +189,26 @@ impl Tunnel {
     pub async fn failed_since(&self) -> Option<Instant> {
         self.inner.lock().await.failed_since
     }
+
+    pub async fn mark_switched(&self) {
+        self.inner.lock().await.last_switch_at = Some(Instant::now());
+    }
+
+    pub async fn up_for(&self) -> Option<Duration> {
+        self.inner
+            .lock()
+            .await
+            .up_since
+            .map(|since| since.elapsed())
+    }
+
+    pub async fn since_switch(&self) -> Option<Duration> {
+        self.inner
+            .lock()
+            .await
+            .last_switch_at
+            .map(|at| at.elapsed())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -192,9 +225,11 @@ pub struct Manager {
     pub max_slots: usize,
     pub settings: Arc<RwLock<WebSettings>>,
     pub nodes: NodeCache,
+    pub node_health: Arc<NodeHealthStore>,
     pub jobs: Arc<JobStore>,
     factory: Arc<dyn TunnelFactory>,
     pub tunnels: Arc<Mutex<HashMap<usize, Arc<Tunnel>>>>,
+    pub observability: Arc<ObservabilityStore>,
     allocate: Arc<Mutex<()>>,
     closing: Arc<AtomicBool>,
     panel: std::sync::OnceLock<Arc<dyn Panel>>,
@@ -207,15 +242,18 @@ impl Manager {
         settings: Arc<RwLock<WebSettings>>,
         jobs: Arc<JobStore>,
         factory: Arc<dyn TunnelFactory>,
+        observability: Arc<ObservabilityStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
             dir,
             max_slots,
             settings,
             nodes: NodeCache::default(),
+            node_health: Arc::new(NodeHealthStore::default()),
             jobs,
             factory,
             tunnels: Arc::new(Mutex::new(HashMap::new())),
+            observability,
             allocate: Arc::new(Mutex::new(())),
             closing: Arc::new(AtomicBool::new(false)),
             panel: std::sync::OnceLock::new(),
@@ -369,6 +407,8 @@ impl Manager {
         let m = self.clone();
         let bg = t.clone();
         let generation = t.generation();
+        self.observability
+            .update_identity(slot, t.host().await, generation);
         tokio::spawn(async move {
             m.bring_up(bg, true, false, generation).await;
         });
@@ -445,8 +485,13 @@ impl Manager {
             .into_iter()
             .find(|n| n.hostname != old)
             .ok_or_else(|| anyhow!("没有可换的节点"))?;
-        t.bump_generation();
+        let generation = t.bump_generation();
+        t.mark_switched().await;
+        self.observability
+            .record_reconnect(t.slot, old.clone(), generation, "manual_swap");
         t.set_node(next).await;
+        self.observability
+            .update_identity(t.slot, t.host().await, generation);
         let m = self.clone();
         tokio::spawn(async move {
             m.reconnect(t, old).await;
@@ -456,6 +501,9 @@ impl Manager {
 
     pub async fn reconnect(&self, t: Arc<Tunnel>, old_host: String) {
         let generation = t.bump_generation();
+        t.mark_switched().await;
+        self.observability
+            .update_identity(t.slot, t.host().await, generation);
         t.set_status("starting", "正在换节点重连").await;
         {
             let mut i = t.inner.lock().await;
@@ -487,6 +535,15 @@ impl Manager {
         pools: Arc<PoolService>,
     ) {
         let generation = t.bump_generation();
+        t.mark_switched().await;
+        self.observability
+            .update_identity(t.slot, old_host.clone(), generation);
+        self.observability.record_reconnect(
+            t.slot,
+            old_host.clone(),
+            generation,
+            "failure_replacement",
+        );
         t.set_status("starting", &format!("{reason}，正在清除并更换出口"))
             .await;
         {
@@ -573,15 +630,31 @@ impl Manager {
         for h in &avoid {
             avoid_map.insert(h.clone(), true);
         }
-        order_candidates(
-            &first,
-            &region,
-            prefer_current,
-            s.conn.max_tries,
-            &nodes,
-            &used_map,
-            &avoid_map,
-        )
+        if s.conn.smart_selection {
+            let mode = s.conn.score_mode.clone();
+            let health = self.node_health.clone();
+            order_candidates_scored(
+                &first,
+                &region,
+                prefer_current,
+                s.conn.max_tries,
+                &nodes,
+                &used_map,
+                &avoid_map,
+                |node| health.score(&node.hostname, node_score(node, &mode)),
+                |host| health.is_quarantined(host),
+            )
+        } else {
+            order_candidates(
+                &first,
+                &region,
+                prefer_current,
+                s.conn.max_tries,
+                &nodes,
+                &used_map,
+                &avoid_map,
+            )
+        }
     }
 
     async fn active(&self, t: &Arc<Tunnel>) -> bool {
@@ -593,6 +666,21 @@ impl Manager {
             .await
             .get(&t.slot)
             .is_some_and(|v| Arc::ptr_eq(v, t))
+    }
+
+    async fn automatic_switch_allowed(&self, t: &Arc<Tunnel>, hard_failure: bool) -> bool {
+        let settings = self.settings().await;
+        if hard_failure || !settings.conn.smart_selection {
+            return true;
+        }
+        let dwell = Duration::from_secs(settings.conn.min_dwell_secs);
+        let cooldown = Duration::from_secs(settings.conn.switch_cooldown_secs);
+        let dwell_ok = t.up_for().await.is_none_or(|elapsed| elapsed >= dwell);
+        let cooldown_ok = t
+            .since_switch()
+            .await
+            .is_none_or(|elapsed| elapsed >= cooldown);
+        dwell_ok && cooldown_ok
     }
 
     async fn bring_up(&self, t: Arc<Tunnel>, notify: bool, persist: bool, generation: u64) {
@@ -651,6 +739,9 @@ impl Manager {
     ) -> (bool, String) {
         let candidates = self.candidates_for(t, prefer_current).await;
         let home = t.node().await.country_code;
+        let settings = self.settings().await;
+        let quarantine = Duration::from_secs(settings.conn.node_quarantine_secs);
+        let warp_enabled = settings.warp().enabled;
         let mut last = "没有可用候选节点".to_string();
         for (i, node) in candidates.into_iter().enumerate() {
             if generation != t.generation() || !self.active(t).await {
@@ -660,18 +751,38 @@ impl Manager {
                 continue;
             }
             t.set_node(node.clone()).await;
+            self.observability
+                .update_identity(t.slot, node.hostname.clone(), generation);
             let note = if i == 0 {
                 String::new()
             } else {
                 crate::nodes::swap_note(i, &home, &node.country_code)
             };
             t.set_status("starting", &note).await;
+            let started = Instant::now();
             match t.runtime.start(&node).await {
                 Ok(ip) => {
                     if generation != t.generation() || !self.active(t).await {
                         return (false, last);
                     }
                     t.set_up(ip).await;
+                    self.node_health.record_connect(
+                        &node.hostname,
+                        true,
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        quarantine,
+                    );
+                    if warp_enabled {
+                        self.node_health.record_warp(&node.hostname, true);
+                    }
+                    self.observability.record_event(
+                        t.slot,
+                        node.hostname.clone(),
+                        generation,
+                        "candidate_ready",
+                        "up",
+                        &format!("连接耗时 {} ms", started.elapsed().as_millis()),
+                    );
                     self.persist().await.ok();
                     if notify {
                         self.notify_panel().await;
@@ -683,6 +794,22 @@ impl Manager {
                         return (false, last);
                     }
                     last = e.to_string();
+                    self.node_health.record_connect(
+                        &node.hostname,
+                        false,
+                        started.elapsed().as_secs_f64() * 1000.0,
+                        quarantine,
+                    );
+                    if warp_enabled && last.to_ascii_lowercase().contains("warp") {
+                        self.node_health.record_warp(&node.hostname, false);
+                    }
+                    self.observability.record_failure(
+                        t.slot,
+                        node.hostname.clone(),
+                        generation,
+                        "candidate_failed",
+                        &last,
+                    );
                     let _ = t.runtime.stop().await;
                     self.avoid_failed(t, &node.hostname).await;
                 }
@@ -852,6 +979,12 @@ impl Manager {
     }
 
     pub async fn exits(&self) -> Vec<Exit> {
+        let metrics: HashMap<_, _> = self
+            .observability
+            .snapshots()
+            .into_iter()
+            .map(|item| (item.slot, item))
+            .collect();
         let mut out = Vec::new();
         for t in self.tunnels().await {
             let s = t.state().await;
@@ -874,6 +1007,7 @@ impl Manager {
                 warp_ip,
                 warp_live,
                 aead,
+                metrics: metrics.get(&s.slot).cloned(),
             });
         }
         out
@@ -906,6 +1040,8 @@ impl Manager {
             self.tunnels.lock().await.insert(p.slot, t.clone());
             let m = self.clone();
             let generation = t.generation();
+            self.observability
+                .update_identity(p.slot, t.host().await, generation);
             tokio::spawn(async move {
                 m.bring_up(t, true, true, generation).await;
             });
@@ -970,37 +1106,81 @@ impl Manager {
                     continue;
                 }
                 let sem = sem.clone();
+                let observability = self.observability.clone();
+                let node_health = self.node_health.clone();
+                let warp_for_task = warp.clone();
+                let quarantine = Duration::from_secs(s.conn.node_quarantine_secs);
+                let host = t.host().await;
+                let generation = t.generation();
                 tasks.push(tokio::spawn(async move {
                     let _permit = sem.acquire_owned().await.ok();
                     if let Err(e) = t.runtime.guard_transit().await {
+                        observability.record_failure(
+                            t.slot,
+                            host.clone(),
+                            generation,
+                            "transit_guard_failed",
+                            &e.to_string(),
+                        );
                         tracing::warn!("隧道 {} 中转路由对齐失败: {e}", t.slot);
                     }
                     if warp_enabled {
                         let (_, live) = t.runtime.transit_status().await;
                         if !live {
+                            node_health.record_warp(&host, false);
+                            warp_for_task.note_handshake_failure(t.slot).await;
                             return (t, false, "WARP 尚未握手".to_string(), false, true);
                         }
+                        node_health.record_warp(&host, true);
+                        warp_for_task.note_handshake_success(t.slot).await;
                     }
                     if let Some(why) = t.runtime.dead_reason() {
+                        node_health.record_probe(&host, false, None, quarantine);
+                        observability.record_failure(
+                            t.slot,
+                            host.clone(),
+                            generation,
+                            "process_dead",
+                            &why,
+                        );
                         return (t, false, why, true, false);
                     }
+                    let started = Instant::now();
                     match t.runtime.probe_exit_ip().await {
                         Ok(ip) => {
+                            let latency = started.elapsed().as_secs_f64() * 1000.0;
                             let expected = t.exit_ip().await;
                             let same = ip == expected;
-                            (
-                                t,
+                            let why = if same {
+                                String::new()
+                            } else {
+                                format!("出口变成 {ip}")
+                            };
+                            observability.record_probe(
+                                t.slot,
+                                host.clone(),
+                                generation,
                                 same,
-                                if same {
-                                    String::new()
-                                } else {
-                                    format!("出口变成 {ip}")
-                                },
-                                false,
-                                false,
-                            )
+                                Some(latency),
+                                &why,
+                            );
+                            node_health.record_probe(&host, same, Some(latency), quarantine);
+                            (t, same, why, false, false)
                         }
-                        Err(e) => (t, false, e.to_string(), false, false),
+                        Err(e) => {
+                            let latency = started.elapsed().as_secs_f64() * 1000.0;
+                            let why = e.to_string();
+                            observability.record_probe(
+                                t.slot,
+                                host.clone(),
+                                generation,
+                                false,
+                                Some(latency),
+                                &why,
+                            );
+                            node_health.record_probe(&host, false, Some(latency), quarantine);
+                            (t, false, why, false, false)
+                        }
                     }
                 }));
             }
@@ -1023,13 +1203,23 @@ impl Manager {
                     *n += 1;
                     if certain || *n >= s.conn.health_failures {
                         fails.insert(t.slot, 0);
-                        down.push((t, why, false));
+                        if self.automatic_switch_allowed(&t, certain).await {
+                            down.push((t, why, false));
+                        }
                     }
                 }
             }
             for (t, why, warp_timeout) in down.into_iter().take(s.conn.reconnect_limit) {
                 tracing::info!("隧道 {} 已掉线：{}", t.slot, why);
                 let old = t.host().await;
+                self.observability.record_event(
+                    t.slot,
+                    old.clone(),
+                    t.generation(),
+                    "health_down",
+                    "failed",
+                    &why,
+                );
                 if warp_timeout {
                     self.replace_failed(t, old, why, warp.clone(), pools.clone())
                         .await;

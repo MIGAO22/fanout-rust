@@ -319,34 +319,69 @@ pub fn order_candidates(
     used: &HashMap<String, bool>,
     avoid: &HashMap<String, bool>,
 ) -> Vec<Node> {
+    order_candidates_scored(
+        current,
+        region,
+        prefer_current,
+        max_tries,
+        pool,
+        used,
+        avoid,
+        |_| 0.0,
+        |_| false,
+    )
+}
+
+pub fn order_candidates_scored<F, Q>(
+    current: &Node,
+    region: &str,
+    prefer_current: bool,
+    max_tries: usize,
+    pool: &[Node],
+    used: &HashMap<String, bool>,
+    avoid: &HashMap<String, bool>,
+    score: F,
+    quarantined: Q,
+) -> Vec<Node>
+where
+    F: Fn(&Node) -> f64,
+    Q: Fn(&str) -> bool,
+{
     let mut same = Vec::new();
     let mut other = Vec::new();
-    for node in pool {
+    for (index, node) in pool.iter().enumerate() {
         if node.hostname == current.hostname
             || used.get(&node.hostname).copied().unwrap_or(false)
             || avoid.get(&node.hostname).copied().unwrap_or(false)
+            || quarantined(&node.hostname)
         {
             continue;
         }
+        let item = (index, score(node), node.clone());
         if region.is_empty() || node.country_code == region {
-            same.push(node.clone());
+            same.push(item);
         } else {
-            other.push(node.clone());
+            other.push(item);
         }
     }
+    let sort_by_score = |a: &(usize, f64, Node), b: &(usize, f64, Node)| {
+        b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0))
+    };
+    same.sort_by(&sort_by_score);
+    other.sort_by(&sort_by_score);
 
     let mut out = Vec::new();
     if prefer_current {
         out.push(current.clone());
     }
-    for node in same {
+    for (_, _, node) in same {
         if out.len() >= max_tries {
             return out;
         }
         out.push(node);
     }
     if !prefer_current {
-        for node in other {
+        for (_, _, node) in other {
             if out.len() >= max_tries {
                 return out;
             }

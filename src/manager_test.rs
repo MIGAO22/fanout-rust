@@ -101,6 +101,7 @@ fn manager(dir: &Path) -> Arc<Manager> {
         Arc::new(RwLock::new(WebSettings::default())),
         JobStore::new(),
         Arc::new(MockFactory),
+        Arc::new(crate::observability::ObservabilityStore::default()),
     )
 }
 
@@ -250,4 +251,31 @@ fn failed_exit_retry_requires_warp_failure_and_elapsed_timeout() {
         timeout
     ));
     assert!(!failed_exit_retry_due("up", true, Some(expired), timeout));
+}
+
+#[tokio::test]
+async fn automatic_switch_respects_dwell_and_cooldown_but_not_hard_failure() {
+    let temporary = tempfile::tempdir().unwrap();
+    let manager = manager(temporary.path());
+    manager.settings.write().await = WebSettings {
+        conn: crate::config::ConnSettings {
+            smart_selection: true,
+            min_dwell_secs: 60,
+            switch_cooldown_secs: 30,
+            ..crate::config::ConnSettings::defaults()
+        },
+        ..WebSettings::default()
+    }
+    .normalized();
+    let runtime = Arc::new(MockRuntime::new(new_socks_cred(), false));
+    let tunnel = Tunnel::new(1, 30_001, new_socks_cred(), node("node-1"), runtime);
+    tunnel.set_up("203.0.113.10".into()).await;
+    assert!(!manager.automatic_switch_allowed(&tunnel, false).await);
+    assert!(manager.automatic_switch_allowed(&tunnel, true).await);
+    {
+        let mut inner = tunnel.inner.lock().await;
+        inner.up_since = Some(Instant::now() - Duration::from_secs(61));
+        inner.last_switch_at = Some(Instant::now() - Duration::from_secs(31));
+    }
+    assert!(manager.automatic_switch_allowed(&tunnel, false).await);
 }

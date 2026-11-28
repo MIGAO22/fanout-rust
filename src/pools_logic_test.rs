@@ -1041,6 +1041,7 @@ fn pool_view_projects_runtime_state_and_mode_aliases() {
         true,
         Some("waiting"),
         &HashSet::from(["a".to_string()]),
+        POOL_MODE_LATENCY,
     );
     assert_eq!(view.identity, "pool-p1");
     assert_eq!(view.mode, POOL_MODE_LATENCY);
@@ -1052,4 +1053,49 @@ fn pool_view_projects_runtime_state_and_mode_aliases() {
     assert_eq!(view.members[1].status, "missing");
     assert_eq!(view.fill_note, "waiting");
     assert_eq!(view.socks_user, "u");
+}
+
+#[test]
+fn auto_strategy_adapts_to_member_quality_with_current_mode_hysteresis() {
+    let mut pool = Pool {
+        mode: POOL_MODE_SINGLE.to_string(),
+        auto_strategy: true,
+        ..Pool::default()
+    };
+    let uniform = vec![
+        up_member("a", Duration::from_millis(50)),
+        up_member("b", Duration::from_millis(55)),
+        up_member("c", Duration::from_millis(60)),
+        up_member("d", Duration::from_millis(65)),
+    ];
+    assert_eq!(
+        auto_pool_mode(&pool, &uniform, POOL_MODE_SINGLE),
+        POOL_MODE_ROUND_ROBIN
+    );
+
+    let spread = vec![
+        up_member("a", Duration::from_millis(20)),
+        up_member("b", Duration::from_millis(400)),
+    ];
+    assert_eq!(
+        auto_pool_mode(&pool, &spread, POOL_MODE_SINGLE),
+        POOL_MODE_BALANCE
+    );
+
+    let mut cooling = spread.clone();
+    cooling[1].cooling = true;
+    assert_eq!(
+        auto_pool_mode(&pool, &cooling, POOL_MODE_SINGLE),
+        POOL_MODE_CONCURRENT
+    );
+    assert_eq!(
+        auto_pool_mode(&pool, &uniform[..1], POOL_MODE_SINGLE),
+        POOL_MODE_SINGLE
+    );
+
+    pool.auto_strategy = false;
+    assert_eq!(
+        auto_pool_mode(&pool, &spread, POOL_MODE_SINGLE),
+        POOL_MODE_SINGLE
+    );
 }

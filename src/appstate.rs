@@ -1,8 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use crate::{
-    auth::Auth, manager::Manager, panel_runtime::PanelManager, pool_service::PoolService,
-    warp_runtime::WarpService,
+    auth::Auth, manager::Manager, observability::ObservabilityStore, panel_runtime::PanelManager,
+    pool_service::PoolService, warp_runtime::WarpService,
 };
 
 pub struct AppState {
@@ -13,4 +13,5 @@ pub struct AppState {
     pub warp: Arc<WarpService>,
     pub pools: Arc<PoolService>,
     pub panel: Arc<PanelManager>,
+    pub observability: Arc<ObservabilityStore>,
 }

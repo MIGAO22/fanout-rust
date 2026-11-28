@@ -28,6 +28,7 @@ fn test_manager(dir: &Path) -> Arc<Manager> {
         Arc::new(RwLock::new(WebSettings::default())),
         JobStore::new(),
         Arc::new(UnavailableFactory),
+        Arc::new(crate::observability::ObservabilityStore::default()),
     )
 }
 

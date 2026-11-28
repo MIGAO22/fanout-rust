@@ -1,18 +1,20 @@
 use axum::{
-    extract::{Query, State},
+    extract::{ConnectInfo, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use crate::{
     appstate::AppState,
-    config::ConnSettings,
+    config::{ConnSettings, WarpPoolSettings},
     manager::{Manager, ProvisionRequest},
     models::{ExitInbound, ExitsView, WarpOverview},
+    node_health::NodeHealthSnapshot,
+    observability::TimelineEvent,
 };
 
 pub fn error(status: StatusCode, msg: impl Into<String>) -> Response {
@@ -25,6 +27,62 @@ fn internal(e: impl std::fmt::Display) -> Response {
 
 pub async fn health() -> impl IntoResponse {
     Json(json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "name": "fanout-rust"}))
+}
+
+#[derive(Deserialize)]
+pub struct TimelineQuery {
+    pub slot: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+pub async fn timeline(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TimelineQuery>,
+) -> impl IntoResponse {
+    Json(
+        state
+            .observability
+            .timeline(query.slot, query.limit.unwrap_or(50)),
+    )
+}
+
+pub async fn metrics(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let expected = state
+        .manager
+        .settings()
+        .await
+        .metrics_token
+        .filter(|token| !token.is_empty())
+        .or_else(|| {
+            std::env::var("FANOUT_METRICS_TOKEN")
+                .ok()
+                .filter(|token| !token.is_empty())
+        });
+    let allowed = if peer.ip().is_loopback() {
+        true
+    } else if let Some(expected) = expected {
+        headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == format!("Bearer {expected}"))
+    } else {
+        false
+    };
+    if !allowed {
+        return error(
+            StatusCode::UNAUTHORIZED,
+            "metrics requires loopback or bearer token",
+        );
+    }
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        state.observability.render_prometheus(),
+    )
+        .into_response()
 }
 
 pub async fn exits(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -94,6 +152,10 @@ pub async fn exits(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 pub async fn tunnels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let m = &state.manager;
     Json(m.states().await)
+}
+
+pub async fn node_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(state.manager.node_health.snapshots())
 }
 
 #[derive(Deserialize)]
@@ -269,6 +331,8 @@ pub struct PoolSaveReq {
     pub size: usize,
     #[serde(default)]
     pub preferred_countries: Vec<String>,
+    #[serde(default)]
+    pub auto_strategy: bool,
 }
 
 pub async fn pool_save(
@@ -296,6 +360,7 @@ pub async fn pool_save(
         auto_fill: req.auto_fill,
         size: req.size,
         preferred_countries: req.preferred_countries,
+        auto_strategy: req.auto_strategy,
     };
     if let Err(err) = state.pools.check_pool_hosts(&mut pool).await {
         return error(StatusCode::BAD_REQUEST, err.to_string());
@@ -440,10 +505,12 @@ pub async fn warp_set(State(state): State<Arc<AppState>>, Query(q): Query<WarpQu
     if let Err(e) = state.manager.update_settings(settings).await {
         return internal(e);
     }
+    state.warp.refresh_pool().await;
     if !on {
         if let Err(e) = state.warp.drop_all().await {
             tracing::warn!("撤销 WARP 注册失败: {e}");
         }
+        state.warp.refresh_pool().await;
     }
     for t in state.manager.tunnels().await {
         let old = t.host().await;
@@ -582,6 +649,8 @@ pub struct SettingsReq {
     pub listen_addr: Option<String>,
     pub residential_only: Option<bool>,
     pub conn: Option<ConnSettings>,
+    pub warp_pool: Option<WarpPoolSettings>,
+    pub metrics_token: Option<String>,
 }
 
 pub async fn settings(
@@ -620,6 +689,13 @@ pub async fn settings(
         if let Some(conn) = req.conn {
             next.conn = conn;
         }
+        if let Some(pool) = req.warp_pool {
+            next.warp.get_or_insert_with(Default::default).pool = pool;
+        }
+        if let Some(token) = req.metrics_token {
+            let token = token.trim().to_string();
+            next.metrics_token = (!token.is_empty()).then_some(token);
+        }
         if let Some(password) = req.password.filter(|password| !password.is_empty()) {
             if let Err(err) = state.auth.set_password(&password).await {
                 return error(StatusCode::BAD_REQUEST, err.to_string());
@@ -638,6 +714,7 @@ pub async fn settings(
         if let Err(e) = state.manager.update_settings(next).await {
             return internal(e);
         }
+        state.warp.refresh_pool().await;
         if restarting {
             tokio::spawn(async {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -653,6 +730,8 @@ pub async fn settings(
         "has_password": true,
         "residential_only": s.residential_only(),
         "conn": s.conn,
+        "warp_pool": s.warp().pool,
+        "metrics_token_set": s.metrics_token.as_deref().is_some_and(|token| !token.is_empty()),
         "restarting": restarting,
         "version": env!("CARGO_PKG_VERSION")
     }))

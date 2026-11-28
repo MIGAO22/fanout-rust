@@ -24,6 +24,7 @@ use crate::{
     models::{Node, SocksCred},
     netns::{netns_has_default, route_has_default, tun0_up, wait_tun_up, Netns, NetnsDialer},
     nodes::{compression_off_args, data_cipher_args, node_supports_aead},
+    observability::{ObservabilityStore, TrafficCounters},
     process::{
         openvpn_paths, output_command, ovpn_log_hint, ovpn_tuning, spawn_openvpn_in_netns, OvpnProc,
     },
@@ -222,6 +223,7 @@ pub struct LinuxTunnelRuntime {
     instance: Instance,
     netns: Netns,
     socks_dialer: OnceLock<Arc<dyn SocksDialer>>,
+    traffic: Arc<TrafficCounters>,
     settings: Arc<RwLock<WebSettings>>,
     warp: Option<Arc<WarpService>>,
     node: RwLock<Option<Node>>,
@@ -243,6 +245,7 @@ impl LinuxTunnelRuntime {
         instance: Instance,
         settings: Arc<RwLock<WebSettings>>,
         warp: Option<Arc<WarpService>>,
+        traffic: Arc<TrafficCounters>,
     ) -> Self {
         let netns = Netns::new(instance.clone(), slot);
         Self {
@@ -252,6 +255,7 @@ impl LinuxTunnelRuntime {
             instance,
             netns,
             socks_dialer: OnceLock::new(),
+            traffic,
             settings,
             warp,
             node: RwLock::new(None),
@@ -314,6 +318,7 @@ impl LinuxTunnelRuntime {
             dialer: NetnsDialer::new(ns),
         });
         let cred = self.cred.clone();
+        let traffic = self.traffic.clone();
         let accepting = Arc::new(AtomicBool::new(true));
         self.accepting.store(true, Ordering::Release);
         let stop = self.stop.lock().await.clone();
@@ -330,9 +335,10 @@ impl LinuxTunnelRuntime {
                                 let c = cred.read().await.clone();
                                 let d = dialer.clone();
                                 let stop = stop.clone();
+                                let traffic = traffic.clone();
                                 tokio::spawn(async move {
                                     tokio::select! {
-                                        _ = serve_socks(stream, Some(&c), d.as_ref()) => {}
+                                        _ = crate::socks5::serve_socks_counted(stream, Some(&c), d.as_ref(), traffic) => {}
                                         _ = stop.cancelled() => {}
                                     }
                                 });
@@ -373,7 +379,13 @@ impl TunnelRuntime for LinuxTunnelRuntime {
                 .warp
                 .as_ref()
                 .ok_or_else(|| anyhow!("WARP 中转已开启，但注册服务未加载"))?;
-            let account = svc.setup(&self.netns, node).await?;
+            let account = match svc.setup(&self.netns, node).await {
+                Ok(account) => account,
+                Err(error) => {
+                    self.netns.teardown();
+                    return Err(error);
+                }
+            };
             if !svc
                 .wait(
                     &self.netns,
@@ -590,6 +602,7 @@ pub struct LinuxTunnelFactory {
     pub instance: Instance,
     pub settings: Arc<RwLock<WebSettings>>,
     pub warp: Option<Arc<WarpService>>,
+    pub observability: Arc<ObservabilityStore>,
 }
 
 impl TunnelFactory for LinuxTunnelFactory {
@@ -600,6 +613,9 @@ impl TunnelFactory for LinuxTunnelFactory {
         cred: SocksCred,
         dir: &Path,
     ) -> Arc<dyn TunnelRuntime> {
+        let traffic = Arc::new(TrafficCounters::default());
+        self.observability
+            .reset_slot(slot, String::new(), 0, traffic.clone());
         Arc::new(LinuxTunnelRuntime::new(
             slot,
             port,
@@ -608,6 +624,7 @@ impl TunnelFactory for LinuxTunnelFactory {
             self.instance.clone(),
             self.settings.clone(),
             self.warp.clone(),
+            traffic,
         ))
     }
 }

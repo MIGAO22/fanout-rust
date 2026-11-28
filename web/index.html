@@ -895,6 +895,16 @@ html[data-theme="dark"] .scr{background:rgba(0,0,0,.62)}
 
       <div class="jobs" id="jobs"></div>
 
+      <section class="panel" id="healthPanel">
+        <div class="ph">
+          <h3>健康时间线</h3>
+          <span class="n" id="timelineCount">0</span>
+          <span class="spacer"></span>
+          <span class="hint">失败、恢复、重连与节点切换</span>
+        </div>
+        <div class="pb" id="timelineList"><div class="none">暂无健康事件</div></div>
+      </section>
+
       <!-- WARP 中转：状态与开关都摆在这儿，每条出口的接入点写在它自己的卡片上 -->
       <section class="wbar" id="wbar">
         <span class="wi"><svg viewBox="0 0 24 24"><path d="M12 2 4 6v6c0 5 3.4 8.6 8 10 4.6-1.4 8-5 8-10V6z"/>
@@ -1194,6 +1204,39 @@ html[data-theme="dark"] .scr{background:rgba(0,0,0,.62)}
 
           <section class="set-card">
             <div class="h">
+              <svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+              <h3>智能选路与防抖</h3>
+            </div>
+            <div class="b">
+              <label class="sw"><input type="checkbox" id="setSmartSelection"><span class="track"></span>
+                <span>按实时质量选节点</span></label>
+              <div class="hint">结合探活延迟、丢包、WARP 握手成功率和连续失败历史排序；未知节点保持中性，不会永久吃亏。</div>
+              <div class="frow">
+                <div class="field">
+                  <label>最短驻留（秒）</label>
+                  <input class="inp mono" id="setMinDwell" type="number" min="0" max="3600" step="1">
+                </div>
+                <div class="field">
+                  <label>切换冷却（秒）</label>
+                  <input class="inp mono" id="setSwitchCooldown" type="number" min="0" max="3600" step="1">
+                </div>
+              </div>
+              <div class="field">
+                <label>失败节点隔离（秒）</label>
+                <input class="inp mono" id="setNodeQuarantine" type="number" min="10" max="3600" step="1">
+                <div class="hint">连续失败达到阈值后暂时跳过该节点；硬故障仍会立即重连，不会被驻留时间挡住。</div>
+              </div>
+              <div class="divider"></div>
+              <div class="field">
+                <label>Prometheus 访问令牌</label>
+                <input class="inp mono" id="setMetricsToken" type="password" autocomplete="off" placeholder="留空则仅允许本机访问 /metrics">
+                <div class="hint">设置后远程抓取需带 Authorization: Bearer；本机回环地址始终允许。</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="set-card">
+            <div class="h">
               <svg viewBox="0 0 24 24"><path d="M12 2 4 6v6c0 5 3.4 8.6 8 10 4.6-1.4 8-5 8-10V6z"/>
                 <path d="m9 12 2 2 4-4"/></svg>
               <h3>隧道保活与自愈</h3>
@@ -1240,6 +1283,39 @@ html[data-theme="dark"] .scr{background:rgba(0,0,0,.62)}
                 </div>
               </div>
               <div class="hint">间隔越短发现掉线越快，但每条隧道都在母机上起一个探测进程，别压太狠。</div>
+            </div>
+          </section>
+
+          <section class="set-card">
+            <div class="h">
+              <svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="8" cy="7" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+              <h3>WARP 账号池</h3>
+            </div>
+            <div class="b">
+              <label class="sw"><input type="checkbox" id="setWarpPoolEnabled"><span class="track"></span>
+                <span>启用账号池与租约隔离</span></label>
+              <div class="hint">每个槽位只租用一个账号；新出口优先使用预热账号，注册并发仍限制为 2。关闭功能时保持旧行为。</div>
+              <div class="frow">
+                <div class="field">
+                  <label>预热账号数</label>
+                  <input class="inp mono" id="setWarpPoolSize" type="number" min="1" max="20" step="1">
+                </div>
+                <div class="field">
+                  <label>预热有效期（秒）</label>
+                  <input class="inp mono" id="setWarpPoolTtl" type="number" min="60" max="86400" step="1">
+                </div>
+              </div>
+              <div class="frow">
+                <div class="field">
+                  <label>连续握手失败轮换（次）</label>
+                  <input class="inp mono" id="setWarpPoolRotate" type="number" min="1" max="20" step="1">
+                </div>
+                <div class="field">
+                  <label>后台预热</label>
+                  <label class="sw" style="margin-top:8px"><input type="checkbox" id="setWarpPrewarm"><span class="track"></span>
+                    <span>保持就绪账号</span></label>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -1480,6 +1556,9 @@ html[data-theme="dark"] .scr{background:rgba(0,0,0,.62)}
         <div class="gl">选路策略</div>
         <div class="seg" id="pomode"></div>
         <div class="hint" id="podesc"></div>
+        <label class="sw" style="margin-top:var(--sp-3)"><input type="checkbox" id="poauto"><span class="track"></span>
+          <span>自动调整策略</span></label>
+        <div class="hint">根据成员延迟差、冷却比例和样本量在四种策略间自动选择，并保留当前策略作为防抖偏好。</div>
       </div>
 
       <div class="field" id="postepwrap"><label>轮询步长（每隔几个新目标换一条出口）</label>

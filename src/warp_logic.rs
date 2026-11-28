@@ -31,13 +31,31 @@ pub const WARP_FRESH_AFTER: Duration = Duration::from_secs(3 * 60);
 pub const WARP_KEY_STDIN: &str = "/proc/self/fd/0";
 pub const WARP_PROBE_DEV: &str = "foarpprobe";
 pub const WIREGUARD_PKG: &str = "wireguard-tools";
-pub const WARP_STORE_VERSION: u32 = 1;
+pub const WARP_STORE_VERSION: u32 = 2;
 const OS_RELEASE_PATH: &str = "/etc/os-release";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarpAccountState {
+    #[default]
+    Ready,
+    Leased,
+    Retiring,
+    Failed,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WarpAccount {
     pub slot: usize,
+    #[serde(default)]
+    pub pool_id: String,
+    #[serde(default)]
+    pub state: WarpAccountState,
+    #[serde(default)]
+    pub lease_generation: u64,
+    #[serde(default)]
+    pub failure_count: u32,
     pub id: String,
     pub token: String,
     #[serde(rename = "priv_key")]
@@ -53,6 +71,10 @@ pub struct WarpAccount {
     pub version: String,
     #[serde(rename = "created_at")]
     pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 impl WarpAccount {
@@ -208,8 +230,17 @@ pub fn warp_account_of(
     if !public_key.is_empty() && !response.key.is_empty() && public_key != response.key {
         bail!("注册响应的公钥与本机生成的不一致");
     }
+    let created_at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     Ok(WarpAccount {
         slot,
+        pool_id: String::new(),
+        state: if slot == 0 {
+            WarpAccountState::Ready
+        } else {
+            WarpAccountState::Leased
+        },
+        lease_generation: 0,
+        failure_count: 0,
         id: response.id.clone(),
         token: response.token.clone(),
         priv_key: private_key.to_string(),
@@ -219,7 +250,9 @@ pub fn warp_account_of(
         port,
         tun_ip,
         version: version.to_string(),
-        created_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
+        created_at: created_at.clone(),
+        updated_at: created_at,
+        last_error: None,
     })
 }
 
@@ -1020,19 +1053,45 @@ pub fn parse_warp_codenames(value: &str) -> Vec<String> {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+pub struct WarpAuditEvent {
+    pub at: String,
+    pub account_id: String,
+    pub cloud_id: String,
+    pub slot: usize,
+    pub lease_generation: u64,
+    pub action: String,
+    pub result: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WarpStore {
     pub version: u32,
     pub accounts: Vec<WarpAccount>,
+    pub audit: Vec<WarpAuditEvent>,
 }
 
 pub fn render_warp_store(accounts: &[WarpAccount]) -> Result<Vec<u8>> {
+    render_warp_store_with_audit(accounts, &[])
+}
+
+pub fn render_warp_store_with_audit(
+    accounts: &[WarpAccount],
+    audit: &[WarpAuditEvent],
+) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec_pretty(&WarpStore {
         version: WARP_STORE_VERSION,
         accounts: accounts.to_vec(),
+        audit: audit.to_vec(),
     })?)
 }
 
 pub fn parse_warp_store(blob: &[u8]) -> Result<Vec<WarpAccount>> {
+    Ok(parse_warp_store_full(blob)?.0)
+}
+
+pub fn parse_warp_store_full(blob: &[u8]) -> Result<(Vec<WarpAccount>, Vec<WarpAuditEvent>)> {
     let store: WarpStore = serde_json::from_slice(blob).context("解析 WARP 注册记录失败")?;
     let mut accounts = Vec::with_capacity(store.accounts.len());
     for mut account in store.accounts {
@@ -1049,9 +1108,18 @@ pub fn parse_warp_store(blob: &[u8]) -> Result<Vec<WarpAccount>> {
         if account.tun_ip.is_empty() {
             account.tun_ip = WARP_TUN_IP.to_string();
         }
+        if account.pool_id.is_empty() {
+            account.pool_id = format!("legacy-{}-{}", account.slot, account.id);
+        }
+        if account.slot > 0 && account.state == WarpAccountState::Ready {
+            account.state = WarpAccountState::Leased;
+        }
+        if account.updated_at.is_empty() {
+            account.updated_at = account.created_at.clone();
+        }
         accounts.push(account);
     }
-    Ok(accounts)
+    Ok((accounts, store.audit))
 }
 
 fn command(parts: &[&str]) -> Vec<String> {

@@ -117,6 +117,12 @@ function agoFrom(iso){
   return relTime(iso);
 }
 function num(v){ const n = Number(v); return isFinite(n) ? n : 0; }
+function rate(v){
+  const n = Number(v) || 0;
+  if(n >= 1e6) return (n / 1e6).toFixed(1) + ' Mbps';
+  if(n >= 1e3) return (n / 1e3).toFixed(0) + ' Kbps';
+  return n.toFixed(0) + ' bps';
+}
 // 后端的 describeSteps 用 " && " 把几条命令串起来。界面只报最后那条真正装包的：
 // 把 apt-get update -qq 也带上，320 宽上这一行要占十一行，而它不是有用的信息。
 function lastStep(cmd){ const p = String(cmd || '').split(' && '); return p[p.length - 1] || ''; }
@@ -481,6 +487,15 @@ function exitCard(e){
       + upTime(e.since) + '</span>' : '';
   const speed = e.node_speed ? '<span class="it">' + ICON.bolt + num(e.node_speed) + ' Mbps</span>' : '';
   const slot = '<span class="it">#' + e.slot + '</span>';
+  const m = e.metrics;
+  const metrics = m && m.probe_total
+    ? '<div class="meta" title="探活 ' + m.probe_total + ' 次，失败 ' + m.probe_failures + ' 次，重连 ' + m.reconnects + ' 次">'
+      + '<span class="it">延迟 ' + (m.latency_ms == null ? '—' : Math.round(m.latency_ms) + ' ms') + '</span>'
+      + '<span class="it">抖动 ' + Math.round(m.jitter_ms || 0) + ' ms</span>'
+      + '<span class="it">丢包 ' + (m.loss_ratio * 100).toFixed(1) + '%</span>'
+      + '<span class="it">↑ ' + rate(m.up_bps) + '</span>'
+      + '<span class="it">↓ ' + rate(m.down_bps) + '</span></div>'
+    : '';
 
   // 标的是节点自己的本事，不是此刻在跑什么算法：VPN Gate 那批节点写死
   // AES-128-CBC，一个标记都不会亮；亮了才说明这条值得吃 AEAD-only 那档。
@@ -520,6 +535,7 @@ function exitCard(e){
     +     ip + '</span></div>'
     + warp
     + '<div class="meta">' + slot + since + speed + aead + '</div>'
+    + metrics
     + '<div class="sock">'
     +   '<span class="ep">' + ICON.server + '<span>' + esc(ep) + '</span>' + auth + '</span>'
     +   '<button class="ico" data-copysock="' + e.slot + '" title="复制 SOCKS5 地址">'
@@ -576,6 +592,11 @@ function warpSub(w){
   const cls = !w.count ? '' : w.live >= w.count ? 'ok' : 'warn';
   let s = '已注册 <b>' + num(w.count) + '</b> 条 · 已握手 <b class="' + cls + '">'
     + num(w.live) + '</b>/' + num(w.count) + ' · 客户端 <b>' + esc(w.version || '—') + '</b>';
+  if(w.pool_enabled){
+    s += ' · 账号池 就绪 <b>' + num(w.pool_ready) + '</b>/租用 <b>' + num(w.pool_leased)
+      + '</b>/退休 <b class="' + (w.pool_retiring ? 'warn' : '') + '">' + num(w.pool_retiring) + '</b>'
+      + (w.pool_failed ? '/失败 <b class="bad">' + num(w.pool_failed) + '</b>' : '');
+  }
   if(w.stale > 0) s += '，<b class="warn">' + num(w.stale) + ' 条还按旧版本号注册着</b>';
   return s;
 }
@@ -750,6 +771,10 @@ function poolRow(p){
   const countryTag = (p.preferred_countries || []).length
     ? ' <span class="pt" title="首选国家至少占维持条数的 60%">首选 ' + esc((p.preferred_countries || []).join('/')) + '</span>'
     : '';
+  const autoTag = p.auto_strategy
+    ? ' <span class="badge acc" title="根据实时质量自动调整策略">自动 → '
+      + esc(({single:'单一',roundrobin:'轮询',latency:'均衡',race:'并发'}[p.effective_mode] || p.effective_mode || '—')) + '</span>'
+    : '';
   // 没补齐时后端会写一句原因（在线出口都用上了 / 槽位余量不够 / 挑不到节点）。
   // 只在还缺人的时候显示，补齐了就闭嘴，否则一个正常的组永远挂着灰字。
   const fillNote = (p.auto_fill && p.fill_note && p.up < p.size)
@@ -762,7 +787,7 @@ function poolRow(p){
     + '<span class="nm">' + esc(p.name)
     +   ' <span class="pt">' + esc(p.mode_label) + '</span>'
     +   ' <span class="pt">' + p.up + '/' + p.total + ' 可用</span>'
-    +   fillTag + countryTag + '</span>'
+    +   fillTag + countryTag + autoTag + '</span>'
     + '<span class="spacer"></span>'
     + '<span class="none">' + esc(p.mode_desc || '') + '</span>'
     + '</div>'
@@ -815,6 +840,7 @@ async function openPool(id){
     || '<div class="none">还没有可用的出口，先开一条再建组。</div>';
   // 补位目标条数：已有组沿用它存的值，新建时按勾选条数起头
   $('#poofill').checked = p ? !!p.auto_fill : false;
+  $('#poauto').checked = p ? !!p.auto_strategy : false;
   $('#posize').value = (p && p.size) ? p.size : 0;
   syncPoolSel();
 
@@ -896,6 +922,7 @@ $('#posave').onclick = async () => {
         id: poolEdit, name: $('#poname').value.trim(), mode: poolMode,
         rr_step: parseInt($('#postep').value, 10) || 5, hosts,
         auto_fill: autoFill, size, preferred_countries: poolCountries,
+        auto_strategy: $('#poauto').checked,
       }),
     });
     toast(poolEdit ? '出口组已保存' : '出口组已创建', 'ok');
@@ -1045,6 +1072,36 @@ function paintBuildJob(){
   if(j.status !== 'running') t += '\n（这一行在出口页的作业卡片里关掉后消失）';
   box.textContent = t;
   box.hidden = false;
+}
+
+/* ───────────── 健康时间线 ───────────── */
+
+let timelineBusy = false;
+const EVENT_LABEL = {
+  probe_failed:'探活失败', probe_recovered:'探活恢复', health_down:'判定掉线',
+  candidate_failed:'候选失败', candidate_ready:'节点就绪', reconnect_started:'开始重连',
+  process_dead:'进程退出', transit_guard_failed:'路由修复失败',
+};
+async function loadTimeline(){
+  if(timelineBusy) return;
+  timelineBusy = true;
+  try{
+    const events = await api('/api/timeline?limit=40') || [];
+    const box = $('#timelineList');
+    $('#timelineCount').textContent = events.length + ' 条';
+    box.innerHTML = events.length ? events.map(ev =>
+      '<div class="orow" style="border:0">'
+      + '<span class="badge ' + (ev.status === 'up' ? 'ok' : ev.status === 'failed' ? 'bad' : 'warn') + '">'
+      + esc(EVENT_LABEL[ev.kind] || ev.kind) + '</span>'
+      + '<span class="pt">#' + ev.slot + '</span>'
+      + '<span class="n">' + esc(ev.host || '—') + '</span>'
+      + '<span class="spacer"></span>'
+      + '<span class="hint">' + esc(agoFrom(ev.at) || ev.at) + '</span>'
+      + (ev.reason ? '<div class="hint">' + esc(ev.reason) + '</div>' : '')
+      + '</div>').join('') : '<div class="none">暂无健康事件</div>';
+  }catch(e){
+    $('#timelineList').innerHTML = '<div class="none">读取失败：' + esc(e.message) + '</div>';
+  }finally{ timelineBusy = false; }
 }
 
 /* ───────────── 轮询 ───────────── */
@@ -1831,6 +1888,7 @@ const DEF = {
   warp_handshake_timeout:5,
   backoff_min:5, backoff_max:60, connect_budget:35,
   max_tries:6, panel_debounce:1500, score_mode:'balanced', node_ttl:600,
+  smart_selection:true, min_dwell_secs:60, switch_cooldown_secs:30, node_quarantine_secs:120,
 };
 function setV(id, v){ const el = $(id); if(el) el.value = (v == null ? '' : v); }
 function getV(id, dflt){
@@ -1875,6 +1933,17 @@ async function loadSettingsPage(){
     setV('#setNodeTtl',         c.node_ttl ?? DEF.node_ttl);
     $('#setScoreMode').value = c.score_mode || DEF.score_mode;
     $('#setAeadOnly').checked = !!c.aead_only;
+    $('#setSmartSelection').checked = c.smart_selection !== false;
+    setV('#setMinDwell', c.min_dwell_secs ?? DEF.min_dwell_secs);
+    setV('#setSwitchCooldown', c.switch_cooldown_secs ?? DEF.switch_cooldown_secs);
+    setV('#setNodeQuarantine', c.node_quarantine_secs ?? DEF.node_quarantine_secs);
+    $('#setMetricsToken').value = '';
+    const wp = s.warp_pool || {};
+    $('#setWarpPoolEnabled').checked = !!wp.enabled;
+    $('#setWarpPrewarm').checked = !!wp.prewarm;
+    setV('#setWarpPoolSize', wp.size || 4);
+    setV('#setWarpPoolTtl', wp.prewarm_ttl_secs || 1800);
+    setV('#setWarpPoolRotate', wp.rotate_after_failures || 3);
     markDirty(false);
   }catch(err){ $('#setPathHint').textContent = '读取失败: ' + err.message; }
 }
@@ -2258,7 +2327,20 @@ $('#setSave').onclick = async e => {
     node_ttl:         getV('#setNodeTtl', DEF.node_ttl),
     score_mode:       $('#setScoreMode').value,
     aead_only:        $('#setAeadOnly').checked,
+    smart_selection:  $('#setSmartSelection').checked,
+    min_dwell_secs:   getV('#setMinDwell', DEF.min_dwell_secs),
+    switch_cooldown_secs: getV('#setSwitchCooldown', DEF.switch_cooldown_secs),
+    node_quarantine_secs: getV('#setNodeQuarantine', DEF.node_quarantine_secs),
   };
+  body.warp_pool = {
+    enabled: $('#setWarpPoolEnabled').checked,
+    prewarm: $('#setWarpPrewarm').checked,
+    size: getV('#setWarpPoolSize', 4),
+    prewarm_ttl_secs: getV('#setWarpPoolTtl', 1800),
+    rotate_after_failures: getV('#setWarpPoolRotate', 3),
+  };
+  const metricsToken = $('#setMetricsToken').value.trim();
+  if(metricsToken) body.metrics_token = metricsToken;
 
   const portChanged = curSettings && (port !== curSettings.port
     || body.listen_addr !== (curSettings.listen_addr || '0.0.0.0'));
@@ -2306,5 +2388,7 @@ $('#setSave').onclick = async e => {
 
 const hash = (location.hash || '').replace('#','');
 if(VIEWS[hash]) showView(hash); else showView('dashboard');
+loadTimeline();
+setInterval(loadTimeline, 5000);
 poll();
 })();

@@ -10,8 +10,10 @@ mod jobs;
 mod manager;
 mod models;
 mod netns;
+mod node_health;
 mod nodecache;
 mod nodes;
+mod observability;
 mod panel;
 mod panel_api;
 mod panel_native;
@@ -88,12 +90,21 @@ fn print_help() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .with_target(false)
-        .init();
+    let filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    if std::env::var("FANOUT_LOG_FORMAT").as_deref() == Ok("json") {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .json()
+            .flatten_event(true)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .init();
+    }
 
     let args = parse_args()?;
     if args.version {
@@ -135,7 +146,9 @@ async fn main() -> Result<()> {
     }
 
     let settings = Arc::new(RwLock::new(settings));
+    let observability = Arc::new(observability::ObservabilityStore::default());
     let warp = warp_runtime::WarpService::load(&dir, instance.clone(), settings.clone())?;
+    warp.refresh_pool().await;
     let listen_addr = settings.read().await.listen_addr.clone();
     let web_port = settings.read().await.port;
     let jobs = jobs::JobStore::new();
@@ -148,7 +161,9 @@ async fn main() -> Result<()> {
             instance,
             settings: settings.clone(),
             warp: Some(warp.clone()),
+            observability: observability.clone(),
         }),
+        observability.clone(),
     );
     let pools = Arc::new(pool_service::PoolService::new(dir.clone(), manager.clone()).await?);
     let panels = Arc::new(
@@ -169,6 +184,7 @@ async fn main() -> Result<()> {
         warp: warp.clone(),
         panel: panels.clone(),
         pools: pools.clone(),
+        observability,
     });
     if let Err(e) = manager.restore().await {
         tracing::warn!("恢复隧道状态失败: {e}");
@@ -193,7 +209,9 @@ async fn main() -> Result<()> {
         .route("/:file", get(web::asset))
         .route("/api/health", get(api::health))
         .route("/api/exits", get(api::exits))
+        .route("/api/timeline", get(api::timeline))
         .route("/api/tunnels", get(api::tunnels))
+        .route("/api/node-health", get(api::node_health))
         .route("/api/nodes", get(api::nodes))
         .route("/api/regions", get(api::regions))
         .route("/api/start", post(api::start))
@@ -237,6 +255,9 @@ async fn main() -> Result<()> {
         state.clone(),
         auth::require_auth,
     ));
+    let metrics_app = Router::new()
+        .route("/metrics", get(api::metrics))
+        .with_state(state.clone());
     let app = if basepath.is_empty() {
         app
     } else {
@@ -266,7 +287,8 @@ async fn main() -> Result<()> {
                     }
                 },
             ))
-    };
+    }
+    .merge(metrics_app);
 
     let addr: SocketAddr = settings.read().await.listen().parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -295,5 +317,6 @@ async fn main() -> Result<()> {
     .await?;
     state.pools.close().await;
     manager.shutdown().await;
+    warp.shutdown().await;
     Ok(())
 }

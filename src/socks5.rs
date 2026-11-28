@@ -1,4 +1,4 @@
-use crate::models::SocksCred;
+use crate::{models::SocksCred, observability::TrafficCounters};
 use anyhow::Error as AnyhowError;
 use async_trait::async_trait;
 use futures::FutureExt;
@@ -141,9 +141,33 @@ pub trait SocksDialer: Send + Sync {
 /// Handles one accepted SOCKS5 TCP connection, including authentication,
 /// request negotiation, and CONNECT or UDP ASSOCIATE relay setup.
 pub async fn serve_socks<D>(
+    client: TcpStream,
+    cred: Option<&SocksCred>,
+    dial: &D,
+) -> Result<(), SocksError>
+where
+    D: SocksDialer + ?Sized,
+{
+    serve_socks_inner(client, cred, dial, None).await
+}
+
+pub async fn serve_socks_counted<D>(
+    client: TcpStream,
+    cred: Option<&SocksCred>,
+    dial: &D,
+    traffic: Arc<TrafficCounters>,
+) -> Result<(), SocksError>
+where
+    D: SocksDialer + ?Sized,
+{
+    serve_socks_inner(client, cred, dial, Some(traffic)).await
+}
+
+async fn serve_socks_inner<D>(
     mut client: TcpStream,
     cred: Option<&SocksCred>,
     dial: &D,
+    traffic: Option<Arc<TrafficCounters>>,
 ) -> Result<(), SocksError>
 where
     D: SocksDialer + ?Sized,
@@ -175,7 +199,7 @@ where
 
     if cmd == CMD_UDP_ASSOCIATE {
         // Unlike CONNECT, UDP ASSOCIATE has no overall control-connection timeout.
-        return serve_udp_associate(client, dial, &addr).await;
+        return serve_udp_associate_inner(client, dial, &addr, traffic).await;
     }
 
     let remote = match timeout_at(deadline, dial.dial(DialNetwork::Tcp, &addr)).await {
@@ -201,7 +225,12 @@ where
         Err(_) => return Err(timeout_error()),
     }
 
-    relay(client, remote).await.map_err(SocksError::from)
+    match traffic {
+        Some(traffic) => relay_counted(client, remote, traffic)
+            .await
+            .map_err(SocksError::from),
+        None => relay(client, remote).await.map_err(SocksError::from),
+    }
 }
 
 /// Negotiates RFC1928 methods and, when required, RFC1929 credentials.
@@ -347,13 +376,30 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
+    relay_inner(a, b, None).await
+}
+
+async fn relay_counted<A, B>(a: A, b: B, traffic: Arc<TrafficCounters>) -> io::Result<()>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    relay_inner(a, b, Some(traffic)).await
+}
+
+async fn relay_inner<A, B>(a: A, b: B, traffic: Option<Arc<TrafficCounters>>) -> io::Result<()>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
     let (mut a_read, mut a_write) = io::split(a);
     let (mut b_read, mut b_write) = io::split(b);
     let mut client_buffer = vec![0_u8; RELAY_BUFFER_SIZE];
     let mut remote_buffer = vec![0_u8; RELAY_BUFFER_SIZE];
+    let traffic = traffic.as_deref();
     tokio::select! {
-        result = copy_relay_direction(&mut a_read, &mut b_write, &mut client_buffer) => result,
-        result = copy_relay_direction(&mut b_read, &mut a_write, &mut remote_buffer) => result,
+        result = copy_relay_direction(&mut a_read, &mut b_write, &mut client_buffer, traffic, true) => result,
+        result = copy_relay_direction(&mut b_read, &mut a_write, &mut remote_buffer, traffic, false) => result,
     }
 }
 
@@ -361,6 +407,8 @@ async fn copy_relay_direction<R, W>(
     mut reader: R,
     mut writer: W,
     buffer: &mut [u8],
+    traffic: Option<&TrafficCounters>,
+    up: bool,
 ) -> io::Result<()>
 where
     R: AsyncRead + Unpin,
@@ -372,6 +420,13 @@ where
             return Ok(());
         }
         writer.write_all(&buffer[..count]).await?;
+        if let Some(traffic) = traffic {
+            if up {
+                traffic.add_up(count);
+            } else {
+                traffic.add_down(count);
+            }
+        }
     }
 }
 
@@ -486,9 +541,21 @@ fn udp_requested_ip(requested: &str, peer_ip: IpAddr) -> IpAddr {
 /// Serves one UDP ASSOCIATE until its TCP control connection closes or the
 /// relay has no client datagrams for 60 seconds.
 pub async fn serve_udp_associate<D>(
+    client: TcpStream,
+    dial: &D,
+    requested_endpoint: &str,
+) -> Result<(), SocksError>
+where
+    D: SocksDialer + ?Sized,
+{
+    serve_udp_associate_inner(client, dial, requested_endpoint, None).await
+}
+
+async fn serve_udp_associate_inner<D>(
     mut client: TcpStream,
     dial: &D,
     requested_endpoint: &str,
+    traffic: Option<Arc<TrafficCounters>>,
 ) -> Result<(), SocksError>
 where
     D: SocksDialer + ?Sized,
@@ -608,13 +675,18 @@ where
                     Arc::clone(&relay),
                     Arc::clone(&sessions),
                     key,
+                    traffic.clone(),
                 ));
                 candidate
             }
         };
 
         // A failed send is left to the per-session reader's idle cleanup.
-        let _ = session.socket.send(&request.payload).await;
+        if session.socket.send(&request.payload).await.is_ok() {
+            if let Some(traffic) = traffic.as_ref() {
+                traffic.add_up(request.payload.len());
+            }
+        }
     };
 
     workers.abort_all();
@@ -628,6 +700,7 @@ async fn relay_udp(
     relay: Arc<UdpSocket>,
     sessions: SessionMap,
     key: String,
+    traffic: Option<Arc<TrafficCounters>>,
 ) {
     let mut buf = vec![0u8; 65_535];
     loop {
@@ -639,6 +712,9 @@ async fn relay_udp(
         let packet = build_udp_resp_header(session.atyp, &session.addr, session.port, &buf[..len]);
         if relay.send_to(&packet, session.client).await.is_err() {
             break;
+        }
+        if let Some(traffic) = traffic.as_ref() {
+            traffic.add_down(len);
         }
     }
 

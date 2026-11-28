@@ -83,6 +83,8 @@ pub struct Exit {
     pub warp_live: bool,
     #[serde(default)]
     pub aead: bool,
+    #[serde(default)]
+    pub metrics: Option<crate::observability::ExitMetricsSnapshot>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -98,6 +100,22 @@ pub struct WarpOverview {
     pub count: usize,
     pub live: usize,
     pub stale: usize,
+    #[serde(default)]
+    pub pool_enabled: bool,
+    #[serde(default)]
+    pub pool_size: usize,
+    #[serde(default)]
+    pub pool_ready: usize,
+    #[serde(default)]
+    pub pool_leased: usize,
+    #[serde(default)]
+    pub pool_retiring: usize,
+    #[serde(default)]
+    pub pool_failed: usize,
+    #[serde(default)]
+    pub prewarm: bool,
+    #[serde(default)]
+    pub audit: Vec<crate::warp_logic::WarpAuditEvent>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -117,6 +135,8 @@ pub struct PoolView {
     pub identity: String,
     pub name: String,
     pub mode: String,
+    #[serde(default)]
+    pub effective_mode: String,
     pub mode_label: String,
     pub mode_desc: String,
     pub rr_step: usize,
@@ -355,6 +375,8 @@ pub struct Pool {
     pub size: usize,
     #[serde(default)]
     pub preferred_countries: Vec<String>,
+    #[serde(default)]
+    pub auto_strategy: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

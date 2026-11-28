@@ -499,6 +499,29 @@ fn order_candidates_always_returns_current_as_fallback() {
 }
 
 #[test]
+fn scored_candidates_preserve_region_tiers_and_skip_quarantine() {
+    let current = nodes_of(&["jp1:JP"]).remove(0);
+    let pool = nodes_of(&["jp2:JP", "jp3:JP", "us1:US", "us2:US"]);
+    let got = order_candidates_scored(
+        &current,
+        "JP",
+        false,
+        6,
+        &pool,
+        &HashMap::new(),
+        &HashMap::new(),
+        |node| match node.hostname.as_str() {
+            "jp3" => 0.9,
+            "jp2" => 0.5,
+            "us2" => 0.8,
+            _ => 0.2,
+        },
+        |host| host == "us2",
+    );
+    assert_eq!(names_of(&got), ["jp3", "jp2", "us1", "jp1"]);
+}
+
+#[test]
 fn swap_note_mentions_cross_region_only_when_known() {
     assert_eq!(swap_note(1, "JP", "JP"), "已换到第 2 个候选节点");
     assert_eq!(

@@ -2,7 +2,7 @@
 
 [fanout](https://github.com/MIGAO22/fanout) 的 Rust 全量重构版：把 VPN Gate 的公共 OpenVPN 节点转换成本地 SOCKS5 出口，并可选择叠加 Cloudflare WARP。前端、工作目录和主要操作方式与 Go 版保持兼容。
 
-稳定版：[v1.0.4](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.0.4)
+稳定版：[v1.1.0](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.1.0)
 
 历史测试版：[Releases](https://github.com/MIGAO22/fanout-rust/releases)
 
@@ -15,6 +15,9 @@
 - 可选的 Cloudflare WARP 中转：注册、WireGuard 握手、分流路由和超时自动替换。
 - 出口组：单一出口、轮询出口、负载均衡、并发出口。
 - 出口组自动补位、首选国家、60% 国家配额、在线出口复用和全局 20 台上限。
+- 实时出口指标：探活延迟、抖动、丢包、SOCKS 吞吐、重连与失败时间线。
+- 智能选路：EWMA 质量评分、失败节点隔离、最短驻留、切换冷却和出口组自动策略。
+- WARP 账号池：槽位租约隔离、有界注册队列、后台预热、失败轮换和清理审计。
 - 3x-ui、自建 Xray、xray-cf-lite 三种节点链接后端。
 - 内嵌 Web 管理界面、订阅链接、客户端管理、主机负载和自更新。
 - amd64 / arm64 双架构 Release，提供 SHA256 校验和。
@@ -46,7 +49,9 @@ PanelManager
 
 - `Manager` 负责出口生命周期、节点选择、重连和健康检查。
 - `PoolService` 负责出口组监听、四种选路策略、探测和自动补位。
-- `WarpService` 负责 Cloudflare 账号、注册限流、握手和分流。
+- `NodeHealthStore` 汇总探活、连接和 WARP 握手历史，为候选排序与隔离提供动态评分。
+- `ObservabilityStore` 保存有界指标与健康时间线，并渲染 Prometheus 文本。
+- `WarpService` 负责 Cloudflare 账号、注册限流、握手和分流；账号池模式额外管理租约、预热与审计。
 - `PanelManager` 统一管理三种节点链接后端，切换模式时保留同一套出口状态。
 - Web 静态资源通过 `rust-embed` 编入二进制，不需要额外部署前端文件。
 
@@ -184,6 +189,13 @@ http://服务器IP:8899/migao/
 - 全局最多 20 条出口，并保留槽位余量防止补位打满。
 - 失败节点进入冷却，成功后清理 avoidance 和失败账本。
 
+## 智能选路与防抖
+
+- 动态评分使用探活延迟、应用层丢包、WARP 握手成功率和连续失败历史；没有样本的节点保持中性。
+- 连续失败达到阈值后节点进入隔离，候选排序会暂时跳过；成功探活会解除隔离。
+- 自动切换遵守最短驻留和切换冷却，OpenVPN 进程退出等硬故障仍立即重连。
+- 出口组可开启“自动调整策略”：根据成员数量、延迟差、冷却比例和样本量在单一、轮询、均衡、并发之间选择，并带当前策略偏好避免来回抖动。
+
 ## WARP 中转
 
 WARP 开启后，流量路径为：
@@ -198,6 +210,22 @@ WARP 开启后，流量路径为：
 - 自动换节点保留原槽位、SOCKS5 端口和凭据，并先清理旧 WARP 注册，避免失败出口永久滞留。
 - 停止的槽位会清理远端 WARP 账号，避免账号和密钥无限增长。
 - 分流路由失败会拒绝把流量暴露为直连。
+
+### WARP 账号池
+
+账号池默认关闭，开启后每个槽位只租用一个账号：
+
+- 新出口优先使用 `Ready` 预热账号，注册并发仍限制为 2，队列满时明确返回背压。
+- 连续握手失败达到设置次数后，账号退出租约并进入轮换/清理流程。
+- 预热账号带有效期，过期或客户端版本变化后会被替换。
+- 租约、注册、预热、轮换和清理都会写入审计；审计不记录 token 或私钥。
+
+## 可观测性
+
+- 出口卡片显示探活延迟、抖动、最近丢包比例、SOCKS 上行/下行速率、重连和失败次数。
+- 管理页提供有界健康时间线，只记录失败、恢复、重连、节点切换和 WARP 事件。
+- `GET /metrics` 输出 Prometheus 文本；本机回环地址可直接访问，远程访问需在设置中配置 Bearer 令牌。
+- 设置 `FANOUT_LOG_FORMAT=json` 后，服务日志切换为结构化 JSON。
 
 ## 节点链接后端
 
@@ -242,9 +270,17 @@ fanout 自己管理 Xray 配置和进程。配置先校验，再原子替换并�
   "port": 8899,
   "listen_addr": "0.0.0.0",
   "residential_only": true,
+  "metrics_token": "",
   "warp": {
     "enabled": true,
-    "client_version": "2026.8.2115.0"
+    "client_version": "2026.8.2115.0",
+    "pool": {
+      "enabled": false,
+      "prewarm": false,
+      "size": 4,
+      "prewarm_ttl_secs": 1800,
+      "rotate_after_failures": 3
+    }
   },
   "conn": {
     "health_interval": 10,
@@ -259,7 +295,11 @@ fanout 自己管理 Xray 配置和进程。配置先校验，再原子替换并�
     "score_mode": "balanced",
     "reconnect_limit": 2,
     "warp_handshake_timeout": 5,
-    "aead_only": false
+    "aead_only": false,
+    "smart_selection": true,
+    "min_dwell_secs": 60,
+    "switch_cooldown_secs": 30,
+    "node_quarantine_secs": 120
   }
 }
 ```
@@ -277,6 +317,10 @@ fanout 自己管理 Xray 配置和进程。配置先校验，再原子替换并�
 | `reconnect_limit` | 2 | 重连候选限制 |
 | `warp_handshake_timeout` | 5 | WARP 连续未握手或出口最终失败后，自动清除并换节点重连的分钟数 |
 | `aead_only` | false | 对支持 AEAD 的节点关闭非 AEAD 数据通道 |
+| `smart_selection` | true | 按实时健康评分排序候选节点 |
+| `min_dwell_secs` | 60 | 自动切换前的最短驻留时间，秒 |
+| `switch_cooldown_secs` | 30 | 两次自动切换之间的冷却时间，秒 |
+| `node_quarantine_secs` | 120 | 连续失败节点的初始隔离时间，秒 |
 
 ## 更新与回滚
 

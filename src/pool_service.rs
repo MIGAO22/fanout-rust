@@ -10,12 +10,13 @@ use crate::{
     nodes::{new_socks_cred, node_supports_aead, validate_cred},
     panel_native::egress_tag,
     pools_logic::{
-        assess_pool_fill, canonical_pool_mode, country_fill_plan, country_is_preferred,
-        creation_room, fill_avoid, fill_candidates, fill_completion_note, fill_failure_reason,
-        fill_slot, host_in_pool, load_pool_store, parse_pool_seq, pool_reuse_pick, pool_view,
-        retire_slot, target_key, PoolFillState, PoolMember, PoolRuntimeState, POOL_FILL_INTERVAL,
-        POOL_FILL_SLOT_FLOOR, POOL_FILL_WAIT_UP, POOL_MODE_BALANCE, POOL_MODE_SINGLE,
-        POOL_PROBE_INTERVAL, POOL_PROBE_TARGET, POOL_TRY_TIMEOUT,
+        assess_pool_fill, auto_pool_mode, canonical_pool_mode, country_fill_plan,
+        country_is_preferred, creation_room, fill_avoid, fill_candidates, fill_completion_note,
+        fill_failure_reason, fill_slot, host_in_pool, load_pool_store, parse_pool_seq,
+        pool_reuse_pick, pool_view, retire_slot, target_key, PoolFillState, PoolMember,
+        PoolRuntimeState, POOL_FILL_INTERVAL, POOL_FILL_SLOT_FLOOR, POOL_FILL_WAIT_UP,
+        POOL_MODE_BALANCE, POOL_MODE_ROUND_ROBIN, POOL_MODE_SINGLE, POOL_PROBE_INTERVAL,
+        POOL_PROBE_TARGET, POOL_TRY_TIMEOUT,
     },
     socks5::{serve_socks, DialNetwork, DialSocket, SocksDialer},
 };
@@ -199,8 +200,14 @@ impl PoolRun {
         target: &str,
         members: &[PoolMember],
         allow_race: bool,
+        mode: &str,
+        step: usize,
     ) -> crate::pools_logic::PoolChoice {
-        let mut choice = lock_unpoisoned(&self.runtime).policy.pick(target, members);
+        let mut runtime = lock_unpoisoned(&self.runtime);
+        if runtime.policy.mode != mode {
+            runtime.policy.reconfigure(mode, step);
+        }
+        let mut choice = runtime.policy.pick(target, members);
         if !allow_race && choice.concurrent {
             choice.concurrent = false;
             if !choice.order.is_empty() {
@@ -210,6 +217,10 @@ impl PoolRun {
             }
         }
         choice
+    }
+
+    fn current_mode(&self) -> String {
+        lock_unpoisoned(&self.runtime).policy.mode.clone()
     }
 
     fn apply_state(&self, members: &mut [PoolMember]) {
@@ -499,6 +510,12 @@ impl PoolService {
             let running = lock_unpoisoned(&self.inner.state)
                 .runs
                 .contains_key(&pool.id);
+            let current_mode = lock_unpoisoned(&self.inner.state)
+                .runs
+                .get(&pool.id)
+                .map(|run| run.current_mode())
+                .unwrap_or_else(|| pool.mode.clone());
+            let effective_mode = auto_pool_mode(&pool, &members, &current_mode).to_string();
             let note = notes.get(&pool.id);
             views.push(pool_view(
                 &pool,
@@ -506,6 +523,7 @@ impl PoolService {
                 running,
                 note.map(String::as_str),
                 &aead_hosts,
+                &effective_mode,
             ));
         }
         views
@@ -608,12 +626,21 @@ impl PoolService {
     ) -> Result<(DialSocket, String)> {
         self.ensure_open()?;
         let run = self.run_of(id).ok_or_else(|| anyhow!("出口组未在运行"))?;
+        let pool = self.pool(id).ok_or_else(|| anyhow!("出口组不存在"))?;
         let target = target_key(addr);
         let members = self.resolved_members(id).await;
         let mut policy_members: Vec<PoolMember> =
             members.iter().map(|member| member.member.clone()).collect();
         run.apply_target_state(&target, &mut policy_members);
-        let choice = run.choose(&target, &policy_members, network == DialNetwork::Tcp);
+        let current_mode = run.current_mode();
+        let mode = auto_pool_mode(&pool, &policy_members, &current_mode).to_string();
+        let choice = run.choose(
+            &target,
+            &policy_members,
+            network == DialNetwork::Tcp,
+            &mode,
+            pool.rr_step,
+        );
         if choice.order.is_empty() {
             bail!("出口组内没有可用出口");
         }
@@ -662,22 +689,24 @@ impl PoolService {
     pub async fn probe_stale(&self) {
         let pools = self.pools();
         for pool in pools {
-            if !matches!(
-                canonical_pool_mode(&pool.mode),
-                Some(POOL_MODE_SINGLE) | Some(POOL_MODE_BALANCE)
-            ) {
-                continue;
-            }
             let Some(run) = self.run_of(&pool.id) else {
                 continue;
             };
             let members = self.resolved_members(&pool.id).await;
+            let current_mode = run.current_mode();
+            let mode = auto_pool_mode(&pool, &members, &current_mode);
+            if !matches!(
+                canonical_pool_mode(mode),
+                Some(POOL_MODE_SINGLE) | Some(POOL_MODE_ROUND_ROBIN) | Some(POOL_MODE_BALANCE)
+            ) {
+                continue;
+            }
             let stale: Vec<_> = {
                 let runtime = lock_unpoisoned(&run.runtime);
                 let now = Utc::now();
                 members
                     .iter()
-                    .filter(|member| runtime.needs_probe(&pool.mode, &member.member, now))
+                    .filter(|member| runtime.needs_probe(mode, &member.member, now))
                     .cloned()
                     .collect()
             };

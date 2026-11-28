@@ -972,6 +972,7 @@ fn store_accounts() -> Vec<WarpAccount> {
             tun_ip: "172.16.0.2".to_string(),
             version: WARP_CLIENT_VERSION.to_string(),
             created_at: "2026-11-24T03:04:05Z".to_string(),
+            ..WarpAccount::default()
         },
         WarpAccount {
             slot: 2,
@@ -1001,6 +1002,41 @@ fn warp_store_round_trip() {
     assert!(value["accounts"].is_array());
     let text = String::from_utf8(blob).unwrap();
     assert!(text.contains("\"priv_key\": \"p1\""));
+}
+
+#[test]
+fn warp_store_v2_preserves_pool_state_and_audit() {
+    let mut accounts = store_accounts();
+    accounts[0].pool_id = "pool-id1".into();
+    accounts[0].state = WarpAccountState::Leased;
+    accounts[0].lease_generation = 7;
+    accounts[1].slot = 0;
+    accounts[1].pool_id = "pool-id2".into();
+    accounts[1].state = WarpAccountState::Ready;
+    let audit = vec![WarpAuditEvent {
+        at: "2026-11-28T00:00:00Z".into(),
+        account_id: "pool-id1".into(),
+        cloud_id: "id1".into(),
+        slot: 1,
+        lease_generation: 7,
+        action: "lease".into(),
+        result: "ok".into(),
+        message: "assigned".into(),
+    }];
+    let blob = render_warp_store_with_audit(&accounts, &audit).unwrap();
+    let (parsed, parsed_audit) = parse_warp_store_full(&blob).unwrap();
+    assert_eq!(parsed[0].state, WarpAccountState::Leased);
+    assert_eq!(parsed[0].lease_generation, 7);
+    assert_eq!(parsed[1].state, WarpAccountState::Ready);
+    assert_eq!(parsed_audit, audit);
+}
+
+#[test]
+fn legacy_warp_store_migrates_slot_accounts_to_leased() {
+    let blob = br#"{"version":1,"accounts":[{"slot":3,"id":"id","token":"t","priv_key":"p","pub_key":"q","peer_key":"k","endpoint":"1.2.3.4","port":2408,"tun_ip":"172.16.0.2","version":"v","created_at":"2026-11-28T00:00:00Z"}]}"#;
+    let accounts = parse_warp_store(blob).unwrap();
+    assert_eq!(accounts[0].state, WarpAccountState::Leased);
+    assert!(!accounts[0].pool_id.is_empty());
 }
 
 #[test]

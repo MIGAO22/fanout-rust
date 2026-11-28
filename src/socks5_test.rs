@@ -25,6 +25,22 @@ async fn handshake(request: &[u8], cred: Option<SocksCred>) -> (Vec<u8>, Result<
 }
 
 #[tokio::test]
+async fn counted_relay_direction_tracks_payload_bytes() {
+    for up in [true, false] {
+        let (mut writer, reader) = io::duplex(64);
+        let traffic = Arc::new(TrafficCounters::default());
+        writer.write_all(b"hello").await.unwrap();
+        drop(writer);
+        let mut buffer = [0_u8; 16];
+        copy_relay_direction(reader, io::sink(), &mut buffer, Some(&traffic), up)
+            .await
+            .unwrap();
+        let (uploaded, downloaded) = traffic.snapshot();
+        assert_eq!((uploaded, downloaded), if up { (5, 0) } else { (0, 5) });
+    }
+}
+
+#[tokio::test]
 async fn parses_ipv4_connect_request() {
     let bytes = [5, CMD_CONNECT, 0, ATYP_IPV4, 8, 8, 8, 8, 0x01, 0xbb];
     let mut input = bytes.as_slice();

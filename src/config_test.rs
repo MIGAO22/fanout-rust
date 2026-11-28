@@ -18,3 +18,17 @@ fn corrupt_settings_are_rejected_instead_of_reset() {
     std::fs::write(temporary.path().join("settings.json"), "{bad json").unwrap();
     assert!(load_settings(temporary.path(), 8899, false).is_err());
 }
+
+#[test]
+fn optimization_defaults_are_backward_compatible() {
+    let settings = WebSettings::default().normalized();
+    assert!(settings.conn.smart_selection);
+    assert_eq!(settings.conn.min_dwell_secs, 60);
+    assert_eq!(settings.conn.switch_cooldown_secs, 30);
+    assert_eq!(settings.conn.node_quarantine_secs, 120);
+    let pool = settings.warp().pool;
+    assert!(!pool.enabled);
+    assert_eq!(pool.size, 4);
+    assert_eq!(pool.prewarm_ttl_secs, 1800);
+    assert_eq!(pool.rotate_after_failures, 3);
+}

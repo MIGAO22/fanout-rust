@@ -20,6 +20,22 @@ pub const DEFAULT_NODE_TTL: u64 = 600;
 pub const DEFAULT_RECONNECT_LIMIT: usize = 2;
 pub const DEFAULT_WARP_HANDSHAKE_TIMEOUT: u64 = 5;
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_min_dwell_secs() -> u64 {
+    60
+}
+
+fn default_switch_cooldown_secs() -> u64 {
+    30
+}
+
+fn default_node_quarantine_secs() -> u64 {
+    120
+}
+
 static SETTINGS_FILE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub fn settings_file_lock() -> &'static Mutex<()> {
@@ -37,6 +53,8 @@ pub struct WebSettings {
     #[serde(default)]
     pub sub_token: Option<String>,
     #[serde(default)]
+    pub metrics_token: Option<String>,
+    #[serde(default)]
     pub warp: Option<WarpSettings>,
     #[serde(default)]
     pub conn: ConnSettings,
@@ -47,11 +65,41 @@ fn default_port() -> u16 {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WarpSettings {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
     pub client_version: Option<String>,
+    pub pool: WarpPoolSettings,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WarpPoolSettings {
+    pub enabled: bool,
+    pub prewarm: bool,
+    pub size: usize,
+    pub prewarm_ttl_secs: u64,
+    pub rotate_after_failures: u32,
+}
+
+impl WarpPoolSettings {
+    fn normalized(&mut self) {
+        self.size = if self.size == 0 {
+            4
+        } else {
+            self.size.clamp(1, 20)
+        };
+        self.prewarm_ttl_secs = if self.prewarm_ttl_secs == 0 {
+            1800
+        } else {
+            self.prewarm_ttl_secs.clamp(60, 86_400)
+        };
+        self.rotate_after_failures = if self.rotate_after_failures == 0 {
+            3
+        } else {
+            self.rotate_after_failures.clamp(1, 20)
+        };
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -82,6 +130,14 @@ pub struct ConnSettings {
     pub warp_handshake_timeout: u64,
     #[serde(default)]
     pub aead_only: bool,
+    #[serde(default = "default_true")]
+    pub smart_selection: bool,
+    #[serde(default = "default_min_dwell_secs")]
+    pub min_dwell_secs: u64,
+    #[serde(default = "default_switch_cooldown_secs")]
+    pub switch_cooldown_secs: u64,
+    #[serde(default = "default_node_quarantine_secs")]
+    pub node_quarantine_secs: u64,
 }
 
 impl WebSettings {
@@ -147,11 +203,29 @@ impl WebSettings {
         } else {
             c.warp_handshake_timeout.clamp(1, 60)
         };
+        c.min_dwell_secs = if c.min_dwell_secs == 0 {
+            default_min_dwell_secs()
+        } else {
+            c.min_dwell_secs.clamp(0, 3600)
+        };
+        c.switch_cooldown_secs = if c.switch_cooldown_secs == 0 {
+            default_switch_cooldown_secs()
+        } else {
+            c.switch_cooldown_secs.clamp(0, 3600)
+        };
+        c.node_quarantine_secs = if c.node_quarantine_secs == 0 {
+            default_node_quarantine_secs()
+        } else {
+            c.node_quarantine_secs.clamp(10, 3600)
+        };
         if !matches!(
             c.score_mode.as_str(),
             "balanced" | "speed" | "idle" | "ping"
         ) {
             c.score_mode = "balanced".into();
+        }
+        if let Some(warp) = self.warp.as_mut() {
+            warp.pool.normalized();
         }
         self
     }
@@ -188,6 +262,10 @@ impl ConnSettings {
             reconnect_limit: DEFAULT_RECONNECT_LIMIT,
             warp_handshake_timeout: DEFAULT_WARP_HANDSHAKE_TIMEOUT,
             aead_only: false,
+            smart_selection: true,
+            min_dwell_secs: default_min_dwell_secs(),
+            switch_cooldown_secs: default_switch_cooldown_secs(),
+            node_quarantine_secs: default_node_quarantine_secs(),
         }
     }
 }

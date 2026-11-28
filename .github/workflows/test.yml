@@ -32,6 +32,9 @@ jobs:
               cat /tmp/fanout-check.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            grep -E '^(error(\[E[0-9]+\])?:|error\[E[0-9]+\])' /tmp/fanout-check.log | while IFS= read -r line; do
+              echo "::error::$line"
+            done
           fi
           exit "$code"
       - name: 单元测试

@@ -891,7 +891,7 @@ impl StableState {
     }
 
     pub fn note_dial_success(&mut self, target: &str, host: &str, latency: Duration, now: Instant) {
-        if self.active.as_deref() != Some(host) {
+        if self.active.as_deref() != Some(host) && !self.leases.contains_key(host) {
             return;
         }
         if !self.affinity.contains_key(target) && self.affinity.len() >= POOL_AFFINITY_MAX {
@@ -912,7 +912,9 @@ impl StableState {
     }
 
     pub fn note_dial_failure(&mut self, host: &str, path_failure: bool, now: Instant) {
-        if self.active.as_deref() != Some(host) || !path_failure {
+        if (self.active.as_deref() != Some(host) && !self.leases.contains_key(host))
+            || !path_failure
+        {
             return;
         }
         let health = self.health.entry(host.to_string()).or_default();

@@ -1088,10 +1088,14 @@ fn stable_mode_requires_verified_switch_and_preserves_inflight_leases() {
     assert_eq!(new_lease.host, "b");
     let sticky_lease = state.acquire_lease("site", &members).unwrap();
     assert_eq!(sticky_lease.host, "a");
+    state.note_dial_failure("a", true, now);
+    let rerouted = state.acquire_lease("site", &members).unwrap();
+    assert_eq!(rerouted.host, "b");
     assert!(state.pinned("a", now));
     state.release_lease(&old_lease);
     state.release_lease(&new_lease);
     state.release_lease(&sticky_lease);
+    state.release_lease(&rerouted);
     assert!(state.pinned("a", now));
 
     state.note_dial_failure("b", true, now);

@@ -1898,7 +1898,7 @@ async fn dial_candidate(
             .ok_or_else(|| anyhow!("成员没有可用拨号器"))?;
         let socket = timeout(POOL_TRY_TIMEOUT, dialer.dial(network, addr))
             .await
-            .map_err(|_| anyhow!("拨号超时"))??;
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "拨号超时"))??;
         let matches = match (&socket, network) {
             (DialSocket::Tcp(_), DialNetwork::Tcp) | (DialSocket::Udp(_), DialNetwork::Udp) => true,
             _ => false,

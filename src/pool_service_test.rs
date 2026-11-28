@@ -231,6 +231,20 @@ async fn new_pools_get_monotonic_ids_generated_credentials_and_validation() {
     service.close().await;
 }
 
+#[test]
+fn path_failure_classification_distinguishes_timeouts_from_target_refusal() {
+    let timeout = anyhow::Error::new(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "dial timeout",
+    ));
+    let refused = anyhow::Error::new(std::io::Error::new(
+        std::io::ErrorKind::ConnectionRefused,
+        "target refused",
+    ));
+    assert!(is_path_failure(&timeout));
+    assert!(!is_path_failure(&refused));
+}
+
 #[tokio::test]
 async fn stable_pool_persists_and_requires_an_active_before_serving() {
     let dir = tempfile::tempdir().unwrap();

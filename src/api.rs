@@ -330,6 +330,8 @@ pub struct PoolSaveReq {
     #[serde(default)]
     pub preferred_countries: Vec<String>,
     #[serde(default)]
+    pub strict_country: bool,
+    #[serde(default)]
     pub auto_strategy: bool,
 }
 
@@ -337,7 +339,7 @@ pub async fn pool_save(
     State(state): State<Arc<AppState>>,
     Json(req): Json<PoolSaveReq>,
 ) -> Response {
-    if req.auto_fill && req.size > req.hosts.len() {
+    if req.auto_fill && !req.strict_country && req.size > req.hosts.len() {
         return error(
             StatusCode::BAD_REQUEST,
             format!(
@@ -358,8 +360,10 @@ pub async fn pool_save(
         auto_fill: req.auto_fill,
         size: req.size,
         preferred_countries: req.preferred_countries,
+        strict_country: req.strict_country,
         auto_strategy: req.auto_strategy,
     };
+    pool.normalize();
     if let Err(err) = state.pools.check_pool_hosts(&mut pool).await {
         return error(StatusCode::BAD_REQUEST, err.to_string());
     }

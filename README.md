@@ -2,7 +2,7 @@
 
 [fanout](https://github.com/MIGAO22/fanout) 的 Rust 全量重构版：把 VPN Gate 的公共 OpenVPN 节点转换成本地 SOCKS5 出口，并可选择叠加 Cloudflare WARP。前端、工作目录和主要操作方式与 Go 版保持兼容。
 
-稳定版：[v1.2.5](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.2.5)
+稳定版：[v1.2.6](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.2.6)
 
 历史测试版：[Releases](https://github.com/MIGAO22/fanout-rust/releases)
 
@@ -198,6 +198,7 @@ http://服务器IP:8899/migao/
 - 优先复用在线空闲出口，其次复用其他组共享的在线出口。
 - 首选国家不足时，会优先从首选国家新建；没有可用首选节点时允许其他国家补足，避免整组停摆。
 - 默认目标为首选国家至少占维持条数的 60%。
+- 可开启“严格国家模式”：只使用所选国家，保存时剔除组内其他成员，补位只从所选国家复用或新建；节点不足时保持缺失，不跨国家兜底。
 - 全局最多 20 条出口，并保留槽位余量防止补位打满。
 - 失败节点进入冷却，成功后清理 avoidance 和失败账本。
 

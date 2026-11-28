@@ -123,6 +123,9 @@ impl Pool {
         if self.hosts.len() > POOL_MAX_SIZE {
             anyhow::bail!("一个出口组最多 32 个出口");
         }
+        if self.strict_country && self.preferred_countries.is_empty() {
+            anyhow::bail!("严格国家模式至少要选择一个国家");
+        }
         // Go's len(string) counts bytes, not Unicode scalar values.
         if self.name.len() > 64 {
             anyhow::bail!("组名最长 64 个字符");
@@ -153,13 +156,29 @@ pub fn country_fill_plan(pool: &Pool, members: &[PoolMember]) -> CountryFillPlan
     if pool.preferred_countries.is_empty() {
         return CountryFillPlan::default();
     }
-    let target = preferred_country_target(pool.size);
+    let target = if pool.strict_country {
+        pool.size
+    } else {
+        preferred_country_target(pool.size)
+    };
     let preferred_live = members
         .iter()
         .filter(|member| {
             member.up && country_is_preferred(&member.country_code, &pool.preferred_countries)
         })
         .count();
+    if pool.strict_country {
+        return CountryFillPlan {
+            preferred_deficit: target.saturating_sub(preferred_live),
+            excess_nonpreferred: members
+                .iter()
+                .filter(|member| {
+                    !country_is_preferred(&member.country_code, &pool.preferred_countries)
+                })
+                .map(|member| member.host.clone())
+                .collect(),
+        };
+    }
     let nonpreferred_live = members
         .iter()
         .filter(|member| {
@@ -294,6 +313,7 @@ struct StoredPool {
     auto_fill: Option<bool>,
     size: Option<i64>,
     preferred_countries: Option<Vec<String>>,
+    strict_country: Option<bool>,
     auto_strategy: Option<bool>,
 }
 
@@ -333,6 +353,7 @@ impl From<StoredPool> for Pool {
             auto_fill: stored.auto_fill.unwrap_or(false),
             size: go_usize(stored.size),
             preferred_countries: stored.preferred_countries.unwrap_or_default(),
+            strict_country: stored.strict_country.unwrap_or(false),
             auto_strategy: stored.auto_strategy.unwrap_or(false),
         };
         pool.normalize();
@@ -1377,7 +1398,14 @@ pub fn pool_view(
     let stable_status = stable
         .map(|state| state.status(members, Instant::now()))
         .unwrap_or_default();
-    let up = members.iter().filter(|member| member.up).count();
+    let up = members
+        .iter()
+        .filter(|member| {
+            member.up
+                && (!pool.strict_country
+                    || country_is_preferred(&member.country_code, &pool.preferred_countries))
+        })
+        .count();
     let ready = running
         && if pool.mode == POOL_MODE_STABLE {
             stable_status.ready
@@ -1412,6 +1440,7 @@ pub fn pool_view(
         auto_fill: pool.auto_fill,
         size: pool.size,
         preferred_countries: pool.preferred_countries.clone(),
+        strict_country: pool.strict_country,
         fill_note: fill_note.unwrap_or("").to_string(),
         stable_phase: stable_status.phase,
         stable_active: stable_status.active,

@@ -1599,7 +1599,9 @@ html[data-theme="dark"] .scr{background:rgba(0,0,0,.62)}
         <button class="btn sm" type="button" id="pocountrybtn">选择国家</button>
         <div id="pocountrypanel" hidden style="margin-top:var(--sp-3)">
           <div class="pb-list" id="pocountries"></div>
-          <div class="hint">自动补位优先保持首选国家至少占维持条数的 60%；首选国家节点不足时才新建同国家出口，超额非首选成员会被优先替换。</div>
+          <label class="sw" style="margin-top:var(--sp-3)"><input type="checkbox" id="postrict"><span class="track"></span>
+            <span>严格国家模式</span></label>
+          <div class="hint" id="pocountryhint">自动补位优先保持首选国家至少占维持条数的 60%；首选国家节点不足时才新建同国家出口，超额非首选成员会被优先替换。</div>
         </div>
       </div>
 

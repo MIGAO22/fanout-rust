@@ -716,6 +716,7 @@ let poolMeta = null;   // /api/pools 的策略清单，第一次打开编辑器�
 let poolEdit = '';     // 正在编辑的组 ID，空串表示新建
 let poolMode = 'single';
 let poolCountries = [];
+let poolStrictCountry = false;
 
 function poolServing(p){
   return !!p.running && (p.mode === 'stable' ? !!p.ready : p.up > 0);
@@ -776,7 +777,8 @@ function poolRow(p){
     ? ' <span class="pt" title="掉线后先用在线出口顶上来，在线的不够才新建">自动补齐 ' + p.size + ' 条</span>'
     : '';
   const countryTag = (p.preferred_countries || []).length
-    ? ' <span class="pt" title="首选国家至少占维持条数的 60%">首选 ' + esc((p.preferred_countries || []).join('/')) + '</span>'
+    ? ' <span class="pt" title="' + (p.strict_country ? '只使用所选国家，补位不跨国家' : '首选国家至少占维持条数的 60%') + '">'
+      + (p.strict_country ? '仅 ' : '首选 ') + esc((p.preferred_countries || []).join('/')) + '</span>'
     : '';
   const autoTag = p.auto_strategy
     ? ' <span class="badge acc" title="根据实时质量自动调整策略">自动 → '
@@ -832,6 +834,8 @@ async function openPool(id){
   poolEdit = p ? p.id : '';
   poolMode = p ? p.mode : 'single';
   poolCountries = p ? (p.preferred_countries || []).slice() : [];
+  poolStrictCountry = p ? !!p.strict_country : false;
+  $('#postrict').checked = poolStrictCountry;
   renderPoolCountries(meta.countries || []);
   $('#pocountrypanel').hidden = true;
   $('#poodlgtitle').textContent = p ? '编辑出口组' : '新建出口组';
@@ -879,6 +883,14 @@ function renderPoolCountries(list){
 function syncPoolCountries(){
   poolCountries = $$('#pocountries input:checked').map(i => i.value);
   $('#pocsel').textContent = poolCountries.length ? '已选 ' + poolCountries.length + ' 国' : '不限';
+  const strict = $('#postrict');
+  strict.disabled = poolCountries.length === 0;
+  if(strict.disabled) strict.checked = false;
+  poolStrictCountry = strict.checked;
+  $('#pocountryhint').textContent = poolStrictCountry
+    ? '严格国家模式：组内只使用所选国家；其他国家成员会被剔除，补位只从所选国家复用或新建，不足时保持缺失，绝不跨国家兜底。'
+    : '自动补位优先保持首选国家至少占维持条数的 60%；首选国家节点不足时才新建同国家出口，超额非首选成员会被优先替换。';
+  paintPoolFill($$('#pohosts input:checked').length);
 }
 
 function paintPoolMode(){
@@ -896,8 +908,7 @@ function syncPoolSel(){
   paintPoolFill(n);
 }
 
-// 维持条数的上限就是勾选的组员数：目标比组员还少，保存完组立刻"缺人"，
-// 补位回路会凭空多开几条隧道去凑一个用户没要过的规模（后端同样会拒）。
+// 普通模式的目标不能超过勾选组员；严格国家模式允许先缺人，再由指定国家补位。
 // 开关关掉时把输入框整块收起——它是这个开关的参数，留着只会让人以为单独有效。
 function paintPoolFill(n){
   const on = $('#poofill').checked;
@@ -905,11 +916,10 @@ function paintPoolFill(n){
   if(!on) return;
   const size = $('#posize');
   size.min = 1;
-  size.max = Math.max(1, n);
-  // 空着、0、比勾选数还大，都夹回"就等于勾选数"：
-  // 开着开关最常见的意图就是"我勾几条就要维持几条"。
+  size.max = poolStrictCountry ? 32 : Math.max(1, n);
+  // 严格国家模式允许目标大于当前勾选数，不足部分只从指定国家自动补齐。
   const v = parseInt(size.value, 10);
-  if(!(v >= 1) || v > n) size.value = Math.max(1, n);
+  if(!(v >= 1) || (!poolStrictCountry && v > n)) size.value = poolStrictCountry ? Math.max(1, v || n) : Math.max(1, n);
 }
 
 $('#pomode').addEventListener('click', e => {
@@ -920,6 +930,7 @@ $('#pomode').addEventListener('click', e => {
 });
 $('#pohosts').addEventListener('change', syncPoolSel);
 $('#pocountries').addEventListener('change', syncPoolCountries);
+$('#postrict').addEventListener('change', syncPoolCountries);
 $('#pocountrybtn').onclick = () => {
   $('#pocountrypanel').hidden = !$('#pocountrypanel').hidden;
 };
@@ -929,9 +940,10 @@ $('#posave').onclick = async () => {
   const btn = $('#posave');
   const hosts = $$('#pohosts input:checked').map(i => i.value);
   if(!hosts.length) return toast('至少勾选一条出口', 'bad');
+  if(poolStrictCountry && !poolCountries.length) return toast('严格国家模式请先选择国家', 'bad');
   const autoFill = $('#poofill').checked;
   const size = parseInt($('#posize').value, 10) || 0;
-  if(autoFill && size > hosts.length) return toast('维持条数不能超过勾选的出口数', 'bad');
+  if(autoFill && size > hosts.length && !poolStrictCountry) return toast('维持条数不能超过勾选的出口数', 'bad');
   btn.disabled = true;
   try{
     await api('/api/pool/save', {
@@ -941,6 +953,7 @@ $('#posave').onclick = async () => {
         id: poolEdit, name: $('#poname').value.trim(), mode: poolMode,
         rr_step: parseInt($('#postep').value, 10) || 5, hosts,
         auto_fill: autoFill, size, preferred_countries: poolCountries,
+        strict_country: poolStrictCountry,
         auto_strategy: $('#poauto').checked,
       }),
     });

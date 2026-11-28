@@ -724,7 +724,12 @@ impl PoolService {
         let notes = lock_unpoisoned(&self.inner.state).fill.notes();
         let mut views = Vec::new();
         for pool in self.pools() {
-            let members = self.resolve_members(&pool.id).await;
+            let mut members = self.resolve_members(&pool.id).await;
+            if pool.strict_country {
+                members.retain(|member| {
+                    country_is_preferred(&member.country_code, &pool.preferred_countries)
+                });
+            }
             let run = lock_unpoisoned(&self.inner.state)
                 .runs
                 .get(&pool.id)
@@ -753,13 +758,16 @@ impl PoolService {
     /// The pool_api.go host validator, exposed for the future HTTP layer.
     /// Blank and duplicate entries are removed in configured order.
     pub async fn check_pool_hosts(&self, pool: &mut Pool) -> Result<()> {
-        let known: HashSet<String> = self
+        if pool.strict_country && pool.preferred_countries.is_empty() {
+            bail!("严格国家模式至少要选择一个国家");
+        }
+        let known: HashMap<String, String> = self
             .inner
             .manager
             .states()
             .await
             .into_iter()
-            .map(|state| state.node.hostname)
+            .map(|state| (state.node.hostname, state.node.country_code))
             .collect();
         let mut seen = HashSet::new();
         let mut unique = Vec::with_capacity(pool.hosts.len());
@@ -769,8 +777,17 @@ impl PoolService {
             if host.is_empty() || !seen.insert(host.to_string()) {
                 continue;
             }
-            if !known.contains(host) {
+            if !known.contains_key(host) {
                 missing.push(host.to_string());
+                continue;
+            }
+            if pool.strict_country
+                && !country_is_preferred(
+                    known.get(host).map(String::as_str).unwrap_or(""),
+                    &pool.preferred_countries,
+                )
+            {
+                continue;
             }
             unique.push(host.to_string());
         }
@@ -799,7 +816,12 @@ impl PoolService {
         };
         let mut out = Vec::with_capacity(snapshots.len());
         for (pool, identity) in snapshots {
-            let members = self.resolve_members(&pool.id).await;
+            let mut members = self.resolve_members(&pool.id).await;
+            if pool.strict_country {
+                members.retain(|member| {
+                    country_is_preferred(&member.country_code, &pool.preferred_countries)
+                });
+            }
             let up = members.iter().filter(|member| member.up).count();
             let ready = if pool.mode == POOL_MODE_STABLE {
                 self.run_of(&pool.id)
@@ -1107,7 +1129,7 @@ impl PoolService {
         let target = target_key(addr);
         loop {
             let membership_epoch = run.membership_epoch();
-            let members = self.resolved_members(id).await;
+            let mut members = self.resolved_members(id).await;
             let route_guard = run.route_swap_lock().await;
             if run.membership_epoch() != membership_epoch {
                 continue;
@@ -1115,6 +1137,11 @@ impl PoolService {
             let Some(pool) = self.pool(id) else {
                 bail!("出口组不存在");
             };
+            if pool.strict_country {
+                members.retain(|member| {
+                    country_is_preferred(&member.country_code, &pool.preferred_countries)
+                });
+            }
             let mut policy_members: Vec<PoolMember> =
                 members.iter().map(|member| member.member.clone()).collect();
             run.apply_target_state(&target, &mut policy_members);
@@ -1201,7 +1228,12 @@ impl PoolService {
             let Some(run) = self.run_of(&pool.id) else {
                 continue;
             };
-            let members = self.resolved_members(&pool.id).await;
+            let mut members = self.resolved_members(&pool.id).await;
+            if pool.strict_country {
+                members.retain(|member| {
+                    country_is_preferred(&member.country_code, &pool.preferred_countries)
+                });
+            }
             let policy_members: Vec<PoolMember> =
                 members.iter().map(|member| member.member.clone()).collect();
             run.stable_reconcile(&policy_members);
@@ -1407,11 +1439,18 @@ impl PoolService {
         let members = self.resolve_members(&pool.id).await;
         let mut assessment = assess_pool_fill(pool, &members, &mut first_dead, now);
         let country_plan = country_fill_plan(pool, &members);
-        assessment.need = assessment.need.max(
-            country_plan
-                .preferred_deficit
-                .min(country_plan.excess_nonpreferred.len()),
-        );
+        assessment.need = if pool.strict_country {
+            assessment
+                .need
+                .max(country_plan.preferred_deficit)
+                .max(country_plan.excess_nonpreferred.len())
+        } else {
+            assessment.need.max(
+                country_plan
+                    .preferred_deficit
+                    .min(country_plan.excess_nonpreferred.len()),
+            )
+        };
         {
             let mut state = lock_unpoisoned(&self.inner.state);
             let store = state.store.clone();
@@ -1441,7 +1480,11 @@ impl PoolService {
                 now,
             )
         };
-        let preferred_slots = country_plan.preferred_deficit.min(assessment.need);
+        let preferred_slots = if pool.strict_country {
+            assessment.need
+        } else {
+            country_plan.preferred_deficit.min(assessment.need)
+        };
         let preferred_candidates: Vec<_> = candidates
             .iter()
             .filter(|candidate| {
@@ -1449,13 +1492,17 @@ impl PoolService {
             })
             .cloned()
             .collect();
-        let other_candidates: Vec<_> = candidates
-            .iter()
-            .filter(|candidate| {
-                !country_is_preferred(&candidate.country_code, &pool.preferred_countries)
-            })
-            .cloned()
-            .collect();
+        let other_candidates: Vec<_> = if pool.strict_country {
+            Vec::new()
+        } else {
+            candidates
+                .iter()
+                .filter(|candidate| {
+                    !country_is_preferred(&candidate.country_code, &pool.preferred_countries)
+                })
+                .cloned()
+                .collect()
+        };
 
         let other_slots = assessment.need.saturating_sub(preferred_slots);
         let mut preferred_picks =
@@ -1502,6 +1549,15 @@ impl PoolService {
                 }
             }
             if completed {
+                continue;
+            }
+            if pool.strict_country {
+                reason.get_or_insert_with(|| {
+                    format!(
+                        "严格国家模式下没有足够的 {} 节点，不会补入其他国家",
+                        pool.preferred_countries.join("/")
+                    )
+                });
                 continue;
             }
             while let Some(host) = other_picks.next() {

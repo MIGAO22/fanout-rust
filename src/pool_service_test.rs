@@ -231,6 +231,44 @@ async fn new_pools_get_monotonic_ids_generated_credentials_and_validation() {
     service.close().await;
 }
 
+#[tokio::test]
+async fn strict_country_validation_removes_nonpreferred_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = test_manager(dir.path());
+    manager
+        .start(crate::models::Node {
+            hostname: "jp-node".into(),
+            country_code: "JP".into(),
+            ..crate::models::Node::default()
+        })
+        .await
+        .unwrap();
+    manager
+        .start(crate::models::Node {
+            hostname: "us-node".into(),
+            country_code: "US".into(),
+            ..crate::models::Node::default()
+        })
+        .await
+        .unwrap();
+    let service = PoolService::load(dir.path(), manager, PoolStore::new())
+        .await
+        .unwrap();
+    let mut pool = Pool {
+        hosts: vec!["jp-node".into(), "us-node".into()],
+        preferred_countries: vec!["JP".into()],
+        strict_country: true,
+        ..Pool::default()
+    };
+    service.check_pool_hosts(&mut pool).await.unwrap();
+    assert_eq!(pool.hosts, ["jp-node"]);
+
+    pool.preferred_countries.clear();
+    let error = service.check_pool_hosts(&mut pool).await.err().unwrap();
+    assert!(error.to_string().contains("至少选择一个国家"));
+    service.close().await;
+}
+
 #[test]
 fn path_failure_classification_distinguishes_timeouts_from_target_refusal() {
     let timeout = anyhow::Error::new(std::io::Error::new(

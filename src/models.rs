@@ -158,6 +158,8 @@ pub struct PoolView {
     pub size: usize,
     #[serde(default)]
     pub preferred_countries: Vec<String>,
+    #[serde(default)]
+    pub strict_country: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fill_note: String,
     #[serde(default)]
@@ -404,6 +406,8 @@ pub struct Pool {
     pub size: usize,
     #[serde(default)]
     pub preferred_countries: Vec<String>,
+    #[serde(default)]
+    pub strict_country: bool,
     #[serde(default)]
     pub auto_strategy: bool,
 }

@@ -349,6 +349,41 @@ fn preferred_countries_normalize_and_round_up_to_sixty_percent() {
 }
 
 #[test]
+fn strict_country_requires_preferences_and_targets_the_full_size() {
+    let mut pool = Pool {
+        id: "p1".into(),
+        hosts: vec!["jp".into(), "kr".into(), "us".into()],
+        auto_fill: true,
+        size: 4,
+        preferred_countries: vec![" jp ".into(), "KR".into()],
+        strict_country: true,
+        ..Pool::default()
+    };
+    pool.normalize();
+    assert!(pool.validate().is_ok());
+    let members = [
+        PoolMember {
+            country_code: "JP".into(),
+            ..up_member("jp", Duration::ZERO)
+        },
+        PoolMember {
+            country_code: "KR".into(),
+            ..up_member("kr", Duration::ZERO)
+        },
+        PoolMember {
+            country_code: "US".into(),
+            ..up_member("us", Duration::ZERO)
+        },
+    ];
+    let plan = country_fill_plan(&pool, &members);
+    assert_eq!(plan.preferred_deficit, 2);
+    assert_eq!(plan.excess_nonpreferred, ["us"]);
+
+    pool.preferred_countries.clear();
+    assert!(pool.validate().is_err());
+}
+
+#[test]
 fn country_fill_plan_replaces_only_excess_nonpreferred_members() {
     let pool = Pool {
         id: "p1".into(),
@@ -426,6 +461,8 @@ fn pool_store_round_trip_preserves_json_and_sequences() {
             user: "u".into(),
             pass: "p".into(),
         },
+        preferred_countries: vec!["JP".into()],
+        strict_country: true,
         ..Pool::default()
     });
     store.save(dir.path()).unwrap();
@@ -435,11 +472,13 @@ fn pool_store_round_trip_preserves_json_and_sequences() {
     assert_eq!(raw["next"], 1);
     assert_eq!(raw["pools"][0]["rr_step"], 5);
     assert_eq!(raw["pools"][0]["auto_fill"], false);
+    assert_eq!(raw["pools"][0]["strict_country"], true);
     assert_eq!(raw["pools"][0]["cred"]["user"], "u");
 
     let loaded = load_pool_store(dir.path()).unwrap();
     assert_eq!(loaded.pools[0].name, "日本组");
     assert_eq!(loaded.pools[0].mode, POOL_MODE_BALANCE);
+    assert!(loaded.pools[0].strict_country);
     assert!(loaded.next >= 2);
 
     fs::write(
@@ -477,6 +516,7 @@ fn pool_store_loader_accepts_legacy_zero_values_and_normalizes() {
     assert_eq!(store.pools[0].size, 1);
     assert_eq!(store.pools[0].name, "出口组 p4");
     assert_eq!(store.pools[0].cred.user, "");
+    assert!(!store.pools[0].strict_country);
 
     assert!(store.swap_member("p4", "a", "new").unwrap());
     assert_eq!(store.pools[0].hosts, ["new"]);

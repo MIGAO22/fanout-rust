@@ -499,7 +499,9 @@ async fn concurrent_dial_returns_the_winner_and_closes_late_sockets() {
     assert_eq!(closed, 0, "the losing socket was not closed");
     timeout(Duration::from_millis(500), async {
         loop {
-            if lock_unpoisoned(&run.runtime).stats.len() == 2 {
+            if lock_unpoisoned(&run.runtime).stats.len() == 2
+                && slow_released.load(std::sync::atomic::Ordering::SeqCst)
+            {
                 break;
             }
             yield_now().await;

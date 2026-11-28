@@ -393,7 +393,7 @@ async fn tcp_route_guard_lives_until_the_relay_finishes() {
     let upstream_addr = upstream.local_addr().unwrap();
     let (remote, mut peer) = tokio::join!(TcpStream::connect(upstream_addr), upstream.accept());
     let remote = remote.unwrap();
-    let (_, mut peer) = peer.unwrap();
+    let (mut peer, _) = peer.unwrap();
     let released = Arc::new(AtomicBool::new(false));
     let dialer = GuardedTcpDialer {
         socket: StdMutex::new(Some(remote)),

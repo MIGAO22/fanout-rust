@@ -239,7 +239,7 @@ pub struct Manager {
     pub tunnels: Arc<Mutex<HashMap<usize, Arc<Tunnel>>>>,
     pub observability: Arc<ObservabilityStore>,
     allocate: Arc<Mutex<()>>,
-    leases: StdMutex<HashMap<(usize, u64), TunnelLeaseState>>,
+    leases: Arc<StdMutex<HashMap<(usize, u64), TunnelLeaseState>>>,
     closing: Arc<AtomicBool>,
     panel: std::sync::OnceLock<Arc<dyn Panel>>,
 }
@@ -264,7 +264,7 @@ impl Manager {
             tunnels: Arc::new(Mutex::new(HashMap::new())),
             observability,
             allocate: Arc::new(Mutex::new(())),
-            leases: StdMutex::new(HashMap::new()),
+            leases: Arc::new(StdMutex::new(HashMap::new())),
             closing: Arc::new(AtomicBool::new(false)),
             panel: std::sync::OnceLock::new(),
         })

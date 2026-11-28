@@ -102,7 +102,7 @@ impl WarpPoolSettings {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConnSettings {
     #[serde(default)]
     pub health_interval: u64,
@@ -243,6 +243,12 @@ impl WebSettings {
 
     pub fn warp(&self) -> WarpSettings {
         self.warp.clone().unwrap_or_default()
+    }
+}
+
+impl Default for ConnSettings {
+    fn default() -> Self {
+        Self::defaults()
     }
 }
 

@@ -379,6 +379,11 @@ fn strict_country_requires_preferences_and_targets_the_full_size() {
     assert_eq!(plan.preferred_deficit, 2);
     assert_eq!(plan.excess_nonpreferred, ["us"]);
 
+    pool.size = 2;
+    let plan = country_fill_plan(&pool, &members);
+    assert_eq!(plan.preferred_deficit, 0);
+    assert_eq!(plan.excess_nonpreferred, ["us"]);
+
     pool.preferred_countries.clear();
     assert!(pool.validate().is_err());
 }

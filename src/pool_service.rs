@@ -727,7 +727,7 @@ impl PoolService {
             let mut members = self.resolve_members(&pool.id).await;
             if pool.strict_country {
                 members.retain(|member| {
-                    country_is_preferred(&member.member.country_code, &pool.preferred_countries)
+                    country_is_preferred(&member.country_code, &pool.preferred_countries)
                 });
             }
             let run = lock_unpoisoned(&self.inner.state)
@@ -819,7 +819,7 @@ impl PoolService {
             let mut members = self.resolve_members(&pool.id).await;
             if pool.strict_country {
                 members.retain(|member| {
-                    country_is_preferred(&member.member.country_code, &pool.preferred_countries)
+                    country_is_preferred(&member.country_code, &pool.preferred_countries)
                 });
             }
             let up = members.iter().filter(|member| member.up).count();

@@ -545,8 +545,11 @@ impl PoolService {
             false
         };
         let _route_guard = if existing {
-            self.run_of(&pool.id)
-                .map(|run| run.route_switch.clone().lock_owned().await)
+            if let Some(run) = self.run_of(&pool.id) {
+                Some(run.route_swap_lock().await)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -595,9 +598,11 @@ impl PoolService {
             .iter()
             .position(|pool| pool.id == id)
             .ok_or_else(|| anyhow!("出口组不存在"))?;
-        let _route_guard = self
-            .run_of(id)
-            .map(|run| run.route_switch.clone().lock_owned().await);
+        let _route_guard = if let Some(run) = self.run_of(id) {
+            Some(run.route_swap_lock().await)
+        } else {
+            None
+        };
         store.pools.remove(index);
         store.save(&self.inner.dir)?;
         {

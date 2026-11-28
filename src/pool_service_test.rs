@@ -265,7 +265,7 @@ async fn strict_country_validation_removes_nonpreferred_hosts() {
 
     pool.preferred_countries.clear();
     let error = service.check_pool_hosts(&mut pool).await.err().unwrap();
-    assert!(error.to_string().contains("至少选择一个国家"));
+    assert_eq!(error.to_string(), "严格国家模式至少要选择一个国家");
     service.close().await;
 }
 

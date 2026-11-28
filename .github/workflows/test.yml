@@ -67,3 +67,15 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-aarch64-linux-gnu
           cargo build --release --target aarch64-unknown-linux-gnu
+      - name: 打包 Linux 二进制
+        run: |
+          tar -czf fanout-rust-linux-amd64.tar.gz -C target/x86_64-unknown-linux-gnu/release fanout-rust
+          tar -czf fanout-rust-linux-arm64.tar.gz -C target/aarch64-unknown-linux-gnu/release fanout-rust
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fanout-rust-linux
+          path: |
+            fanout-rust-linux-amd64.tar.gz
+            fanout-rust-linux-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 7

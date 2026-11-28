@@ -1106,6 +1106,39 @@ html[data-theme="dark"] .scr{background:rgba(0,0,0,.62)}
 
           <section class="set-card">
             <div class="h">
+              <svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+              <h3>智能选路与防抖</h3>
+            </div>
+            <div class="b">
+              <label class="sw"><input type="checkbox" id="setSmartSelection"><span class="track"></span>
+                <span>按实时质量选节点</span></label>
+              <div class="hint">结合探活延迟、丢包、WARP 握手成功率和连续失败历史排序；未知节点保持中性，不会永久吃亏。</div>
+              <div class="frow">
+                <div class="field">
+                  <label>最短驻留（秒）</label>
+                  <input class="inp mono" id="setMinDwell" type="number" min="0" max="3600" step="1">
+                </div>
+                <div class="field">
+                  <label>切换冷却（秒）</label>
+                  <input class="inp mono" id="setSwitchCooldown" type="number" min="0" max="3600" step="1">
+                </div>
+              </div>
+              <div class="field">
+                <label>失败节点隔离（秒）</label>
+                <input class="inp mono" id="setNodeQuarantine" type="number" min="10" max="3600" step="1">
+                <div class="hint">连续失败达到阈值后暂时跳过该节点；硬故障仍会立即重连，不会被驻留时间挡住。</div>
+              </div>
+              <div class="divider"></div>
+              <div class="field">
+                <label>Prometheus 访问令牌</label>
+                <input class="inp mono" id="setMetricsToken" type="password" autocomplete="off" placeholder="留空则仅允许本机访问 /metrics">
+                <div class="hint">设置后远程抓取需带 Authorization: Bearer；本机回环地址始终允许。</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="set-card">
+            <div class="h">
               <svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/>
                 <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
               <h3>节点后端</h3>
@@ -1222,39 +1255,6 @@ html[data-theme="dark"] .scr{background:rgba(0,0,0,.62)}
                 <label>节点清单有效期（秒）</label>
                 <input class="inp mono" id="setNodeTtl" type="text" inputmode="numeric">
                 <div class="hint">清单很大，过期前重复请求都用缓存，避免重连风暴时把带宽吃满。</div>
-              </div>
-            </div>
-          </section>
-
-          <section class="set-card">
-            <div class="h">
-              <svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
-              <h3>智能选路与防抖</h3>
-            </div>
-            <div class="b">
-              <label class="sw"><input type="checkbox" id="setSmartSelection"><span class="track"></span>
-                <span>按实时质量选节点</span></label>
-              <div class="hint">结合探活延迟、丢包、WARP 握手成功率和连续失败历史排序；未知节点保持中性，不会永久吃亏。</div>
-              <div class="frow">
-                <div class="field">
-                  <label>最短驻留（秒）</label>
-                  <input class="inp mono" id="setMinDwell" type="number" min="0" max="3600" step="1">
-                </div>
-                <div class="field">
-                  <label>切换冷却（秒）</label>
-                  <input class="inp mono" id="setSwitchCooldown" type="number" min="0" max="3600" step="1">
-                </div>
-              </div>
-              <div class="field">
-                <label>失败节点隔离（秒）</label>
-                <input class="inp mono" id="setNodeQuarantine" type="number" min="10" max="3600" step="1">
-                <div class="hint">连续失败达到阈值后暂时跳过该节点；硬故障仍会立即重连，不会被驻留时间挡住。</div>
-              </div>
-              <div class="divider"></div>
-              <div class="field">
-                <label>Prometheus 访问令牌</label>
-                <input class="inp mono" id="setMetricsToken" type="password" autocomplete="off" placeholder="留空则仅允许本机访问 /metrics">
-                <div class="hint">设置后远程抓取需带 Authorization: Bearer；本机回环地址始终允许。</div>
               </div>
             </div>
           </section>

@@ -1,5 +1,9 @@
 use super::*;
 use anyhow::anyhow;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex as StdMutex,
+};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
@@ -355,6 +359,80 @@ async fn relay_copies_both_directions_and_stops_after_first_eof() {
     assert_eq!(client_b.read(&mut buf).await.unwrap(), 0);
 }
 
+struct GuardedTcpDialer {
+    socket: StdMutex<Option<TcpStream>>,
+    released: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl SocksDialer for GuardedTcpDialer {
+    async fn dial(&self, network: DialNetwork, addr: &str) -> Result<DialSocket, DialError> {
+        let (socket, guard) = self.dial_guarded(network, addr).await?;
+        drop(guard);
+        Ok(socket)
+    }
+
+    async fn dial_guarded(
+        &self,
+        network: DialNetwork,
+        _addr: &str,
+    ) -> Result<(DialSocket, DialGuard), DialError> {
+        assert_eq!(network, DialNetwork::Tcp);
+        let socket = self.socket.lock().unwrap().take().unwrap();
+        let released = Arc::clone(&self.released);
+        Ok((
+            DialSocket::Tcp(socket),
+            DialGuard::new(move || released.store(true, Ordering::SeqCst)),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn tcp_route_guard_lives_until_the_relay_finishes() {
+    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let (remote, mut peer) = tokio::join!(TcpStream::connect(upstream_addr), upstream.accept());
+    let remote = remote.unwrap();
+    let (_, mut peer) = peer.unwrap();
+    let released = Arc::new(AtomicBool::new(false));
+    let dialer = GuardedTcpDialer {
+        socket: StdMutex::new(Some(remote)),
+        released: Arc::clone(&released),
+    };
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (client, _) = listener.accept().await.unwrap();
+        serve_socks(client, None, &dialer).await
+    });
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    client.write_all(&[5, 1, AUTH_NONE]).await.unwrap();
+    let mut selected = [0u8; 2];
+    client.read_exact(&mut selected).await.unwrap();
+    client
+        .write_all(&[5, CMD_CONNECT, 0, ATYP_IPV4, 1, 1, 1, 1, 0, 53])
+        .await
+        .unwrap();
+    let mut reply = [0u8; 10];
+    client.read_exact(&mut reply).await.unwrap();
+    assert_eq!(&reply[..4], &[5, REP_SUCCESS, 0, ATYP_IPV4]);
+    assert!(!released.load(Ordering::SeqCst));
+
+    client.write_all(b"ping").await.unwrap();
+    let mut payload = [0u8; 4];
+    peer.read_exact(&mut payload).await.unwrap();
+    peer.write_all(b"pong").await.unwrap();
+    client.read_exact(&mut payload).await.unwrap();
+    assert_eq!(&payload, b"pong");
+    client.shutdown().await.unwrap();
+    timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(released.load(Ordering::SeqCst));
+}
+
 struct RejectDialer;
 
 #[async_trait]
@@ -417,16 +495,31 @@ async fn request_failures_use_expected_reply_codes() {
 
 struct EchoDialer {
     target: SocketAddr,
+    released: Arc<AtomicBool>,
 }
 
 #[async_trait]
 impl SocksDialer for EchoDialer {
     async fn dial(&self, network: DialNetwork, addr: &str) -> Result<DialSocket, DialError> {
+        let (socket, guard) = self.dial_guarded(network, addr).await?;
+        drop(guard);
+        Ok(socket)
+    }
+
+    async fn dial_guarded(
+        &self,
+        network: DialNetwork,
+        addr: &str,
+    ) -> Result<(DialSocket, DialGuard), DialError> {
         assert_eq!(network, DialNetwork::Udp);
         assert_eq!(addr, self.target.to_string());
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
         socket.connect(self.target).await?;
-        Ok(DialSocket::Udp(socket))
+        let released = Arc::clone(&self.released);
+        Ok((
+            DialSocket::Udp(socket),
+            DialGuard::new(move || released.store(true, Ordering::SeqCst)),
+        ))
     }
 }
 
@@ -442,9 +535,19 @@ async fn udp_associate_relays_payload_and_reports_bound_address() {
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let released = Arc::new(AtomicBool::new(false));
+    let dialer_released = Arc::clone(&released);
     let server = tokio::spawn(async move {
         let (client, _) = listener.accept().await.unwrap();
-        serve_socks(client, None, &EchoDialer { target: echo_addr }).await
+        serve_socks(
+            client,
+            None,
+            &EchoDialer {
+                target: echo_addr,
+                released: dialer_released,
+            },
+        )
+        .await
     });
 
     let mut control = TcpStream::connect(addr).await.unwrap();
@@ -480,6 +583,7 @@ async fn udp_associate_relays_payload_and_reports_bound_address() {
         .unwrap()
         .unwrap();
     assert_eq!(response, packet);
+    assert!(!released.load(Ordering::SeqCst));
 
     drop(control);
     timeout(Duration::from_secs(2), server)
@@ -487,5 +591,6 @@ async fn udp_associate_relays_payload_and_reports_bound_address() {
         .unwrap()
         .unwrap()
         .unwrap();
+    assert!(released.load(Ordering::SeqCst));
     echo.await.unwrap();
 }

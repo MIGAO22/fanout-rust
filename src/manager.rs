@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex as StdMutex,
     },
     time::{Duration, Instant},
 };
@@ -25,6 +25,7 @@ use crate::{
     panel::Panel,
     pool_service::PoolService,
     runtime::{TunnelFactory, TunnelRuntime},
+    socks5::DialGuard,
     state::{load_state, save_state, StateFile},
     util::{one_line, random_token},
     warp_runtime::WarpService,
@@ -219,6 +220,13 @@ pub struct ProvisionRequest {
     pub every_region: bool,
 }
 
+#[derive(Default)]
+struct TunnelLeaseState {
+    active: usize,
+    retiring: bool,
+    stopping: bool,
+}
+
 #[derive(Clone)]
 pub struct Manager {
     pub dir: PathBuf,
@@ -231,6 +239,7 @@ pub struct Manager {
     pub tunnels: Arc<Mutex<HashMap<usize, Arc<Tunnel>>>>,
     pub observability: Arc<ObservabilityStore>,
     allocate: Arc<Mutex<()>>,
+    leases: StdMutex<HashMap<(usize, u64), TunnelLeaseState>>,
     closing: Arc<AtomicBool>,
     panel: std::sync::OnceLock<Arc<dyn Panel>>,
 }
@@ -255,6 +264,7 @@ impl Manager {
             tunnels: Arc::new(Mutex::new(HashMap::new())),
             observability,
             allocate: Arc::new(Mutex::new(())),
+            leases: StdMutex::new(HashMap::new()),
             closing: Arc::new(AtomicBool::new(false)),
             panel: std::sync::OnceLock::new(),
         })
@@ -300,6 +310,78 @@ impl Manager {
             .await
             .get(&tunnel.slot)
             .is_some_and(|current| Arc::ptr_eq(current, tunnel))
+    }
+
+    pub fn lease_tunnel(self: &Arc<Self>, tunnel: &Arc<Tunnel>) -> Option<DialGuard> {
+        let key = (tunnel.slot, tunnel.generation());
+        let mut leases = self
+            .leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = leases.entry(key).or_default();
+        if state.retiring || state.stopping {
+            return None;
+        }
+        state.active += 1;
+        drop(leases);
+
+        let manager = Arc::clone(self);
+        let tunnel = Arc::clone(tunnel);
+        Some(DialGuard::new(move || {
+            let ready = {
+                let mut leases = manager
+                    .leases
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let Some(state) = leases.get_mut(&key) else {
+                    return;
+                };
+                state.active = state.active.saturating_sub(1);
+                state.active == 0 && state.retiring && !state.stopping
+            };
+            if ready {
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    let manager = Arc::clone(&manager);
+                    let tunnel = Arc::clone(&tunnel);
+                    handle.spawn(async move {
+                        let _ = manager.stop_if_idle(&tunnel).await;
+                    });
+                }
+            }
+        }))
+    }
+
+    pub async fn stop_if_idle(&self, tunnel: &Arc<Tunnel>) -> Result<()> {
+        let key = (tunnel.slot, tunnel.generation());
+        let should_stop = {
+            let mut leases = self
+                .leases
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let state = leases.entry(key).or_default();
+            state.retiring = true;
+            if state.active == 0 && !state.stopping {
+                state.stopping = true;
+                true
+            } else {
+                false
+            }
+        };
+        if !should_stop {
+            return Ok(());
+        }
+        let result = self.stop_current(tunnel).await;
+        let mut leases = self
+            .leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if leases
+            .get(&key)
+            .is_some_and(|state| state.active == 0 && state.stopping)
+        {
+            leases.remove(&key);
+        }
+        result
     }
 
     pub async fn states(&self) -> Vec<TunnelState> {
@@ -450,11 +532,16 @@ impl Manager {
     }
 
     async fn stop_removed(&self, tunnel: Arc<Tunnel>) -> Result<()> {
+        let leased_generation = tunnel.generation();
         tunnel.bump_generation();
         tunnel.set_status("stopped", "").await;
         let _ = tunnel.runtime.stop().await;
         self.persist().await?;
         self.notify_panel().await;
+        self.leases
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&(tunnel.slot, leased_generation));
         Ok(())
     }
 

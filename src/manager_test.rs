@@ -106,6 +106,34 @@ fn manager(dir: &Path) -> Arc<Manager> {
 }
 
 #[tokio::test]
+async fn tunnel_lease_defers_stop_until_the_last_connection_releases() {
+    let temporary = tempfile::tempdir().unwrap();
+    let manager = manager(temporary.path());
+    let runtime = Arc::new(MockRuntime::new(new_socks_cred(), false));
+    let tunnel = Tunnel::new(1, 30_001, new_socks_cred(), node("node-1"), runtime.clone());
+    manager.tunnels.lock().await.insert(1, tunnel.clone());
+
+    let first = manager.lease_tunnel(&tunnel).unwrap();
+    let second = manager.lease_tunnel(&tunnel).unwrap();
+    manager.stop_if_idle(&tunnel).await.unwrap();
+    assert_eq!(runtime.stops.load(Ordering::SeqCst), 0);
+    assert!(manager.is_current(&tunnel).await);
+    assert!(manager.lease_tunnel(&tunnel).is_none());
+
+    drop(first);
+    assert_eq!(runtime.stops.load(Ordering::SeqCst), 0);
+    drop(second);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while manager.is_current(&tunnel).await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(runtime.stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn concurrent_starts_reserve_unique_slots_and_ports() {
     let temporary = tempfile::tempdir().unwrap();
     let manager = manager(temporary.path());

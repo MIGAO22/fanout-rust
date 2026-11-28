@@ -434,28 +434,42 @@ async fn concurrent_dial_returns_the_winner_and_closes_late_sockets() {
     );
     let (fast_socket, mut fast_peer) = tcp_pair().await;
     let (slow_socket, mut slow_peer) = tcp_pair().await;
+    let fast_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let slow_released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fast_guard_release = Arc::clone(&fast_released);
+    let slow_guard_release = Arc::clone(&slow_released);
     let candidates = vec![
-        ResolvedMember {
-            member: up_member("slow"),
-            dialer: Some(Arc::new(DelayedTcpDialer {
-                delay: Duration::from_millis(60),
-                socket: StdMutex::new(Some(slow_socket)),
-            })),
-            tunnel: None,
-            generation: 0,
-        },
-        ResolvedMember {
-            member: up_member("fast"),
-            dialer: Some(Arc::new(DelayedTcpDialer {
-                delay: Duration::from_millis(1),
-                socket: StdMutex::new(Some(fast_socket)),
-            })),
-            tunnel: None,
-            generation: 0,
-        },
+        (
+            ResolvedMember {
+                member: up_member("slow"),
+                dialer: Some(Arc::new(DelayedTcpDialer {
+                    delay: Duration::from_millis(60),
+                    socket: StdMutex::new(Some(slow_socket)),
+                })),
+                tunnel: None,
+                generation: 0,
+            },
+            DialGuard::new(move || {
+                slow_guard_release.store(true, std::sync::atomic::Ordering::SeqCst)
+            }),
+        ),
+        (
+            ResolvedMember {
+                member: up_member("fast"),
+                dialer: Some(Arc::new(DelayedTcpDialer {
+                    delay: Duration::from_millis(1),
+                    socket: StdMutex::new(Some(fast_socket)),
+                })),
+                tunnel: None,
+                generation: 0,
+            },
+            DialGuard::new(move || {
+                fast_guard_release.store(true, std::sync::atomic::Ordering::SeqCst)
+            }),
+        ),
     ];
 
-    let (socket, host) = timeout(
+    let (socket, host, _guard) = timeout(
         Duration::from_secs(2),
         PoolService::race_dial(
             &run,
@@ -495,6 +509,10 @@ async fn concurrent_dial_returns_the_winner_and_closes_late_sockets() {
     .unwrap();
     assert!(lock_unpoisoned(&run.runtime).stats.contains_key("fast"));
     assert!(lock_unpoisoned(&run.runtime).stats.contains_key("slow"));
+    assert!(!fast_released.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(slow_released.load(std::sync::atomic::Ordering::SeqCst));
+    drop(_guard);
+    assert!(fast_released.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 #[tokio::test]

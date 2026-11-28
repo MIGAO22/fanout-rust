@@ -124,6 +124,26 @@ pub enum DialSocket {
 
 pub type DialError = AnyhowError;
 
+pub struct DialGuard(Option<Box<dyn FnOnce() + Send + Sync>>);
+
+impl DialGuard {
+    pub fn new(release: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self(Some(Box::new(release)))
+    }
+
+    pub fn none() -> Self {
+        Self(None)
+    }
+}
+
+impl Drop for DialGuard {
+    fn drop(&mut self) {
+        if let Some(release) = self.0.take() {
+            release();
+        }
+    }
+}
+
 /// Supplies already-created sockets to the SOCKS5 server.
 ///
 /// Implementations are responsible for creating both socket types on a
@@ -136,6 +156,16 @@ pub type DialError = AnyhowError;
 #[async_trait]
 pub trait SocksDialer: Send + Sync {
     async fn dial(&self, network: DialNetwork, addr: &str) -> Result<DialSocket, DialError>;
+
+    async fn dial_guarded(
+        &self,
+        network: DialNetwork,
+        addr: &str,
+    ) -> Result<(DialSocket, DialGuard), DialError> {
+        self.dial(network, addr)
+            .await
+            .map(|socket| (socket, DialGuard::none()))
+    }
 }
 
 /// Handles one accepted SOCKS5 TCP connection, including authentication,
@@ -202,21 +232,22 @@ where
         return serve_udp_associate_inner(client, dial, &addr, traffic).await;
     }
 
-    let remote = match timeout_at(deadline, dial.dial(DialNetwork::Tcp, &addr)).await {
-        Ok(Ok(DialSocket::Tcp(stream))) => stream,
-        Ok(Ok(DialSocket::Udp(_))) => {
-            let _ = timeout_at(deadline, socks_reply(&mut client, REP_HOST_UNREACHABLE)).await;
-            return Err(SocksError::WrongSocketType("TcpStream"));
-        }
-        Ok(Err(err)) => {
-            let _ = timeout_at(deadline, socks_reply(&mut client, REP_HOST_UNREACHABLE)).await;
-            return Err(err.into());
-        }
-        Err(_) => {
-            let _ = timeout_at(deadline, socks_reply(&mut client, REP_HOST_UNREACHABLE)).await;
-            return Err(timeout_error());
-        }
-    };
+    let (remote, _guard) =
+        match timeout_at(deadline, dial.dial_guarded(DialNetwork::Tcp, &addr)).await {
+            Ok(Ok((DialSocket::Tcp(stream), guard))) => (stream, guard),
+            Ok(Ok((DialSocket::Udp(_), _))) => {
+                let _ = timeout_at(deadline, socks_reply(&mut client, REP_HOST_UNREACHABLE)).await;
+                return Err(SocksError::WrongSocketType("TcpStream"));
+            }
+            Ok(Err(err)) => {
+                let _ = timeout_at(deadline, socks_reply(&mut client, REP_HOST_UNREACHABLE)).await;
+                return Err(err.into());
+            }
+            Err(_) => {
+                let _ = timeout_at(deadline, socks_reply(&mut client, REP_HOST_UNREACHABLE)).await;
+                return Err(timeout_error());
+            }
+        };
 
     let _ = remote.set_nodelay(true);
     match timeout_at(deadline, socks_reply(&mut client, REP_SUCCESS)).await {
@@ -511,6 +542,7 @@ struct UdpSession {
     atyp: u8,
     addr: Vec<u8>,
     port: u16,
+    _guard: DialGuard,
 }
 
 type SessionMap = Arc<Mutex<HashMap<String, Arc<UdpSession>>>>;
@@ -651,8 +683,8 @@ where
             if full {
                 continue;
             }
-            let socket = match dial.dial(DialNetwork::Udp, &dest).await {
-                Ok(DialSocket::Udp(socket)) => socket,
+            let (socket, guard) = match dial.dial_guarded(DialNetwork::Udp, &dest).await {
+                Ok((DialSocket::Udp(socket), guard)) => (socket, guard),
                 _ => continue,
             };
             let candidate = Arc::new(UdpSession {
@@ -661,6 +693,7 @@ where
                 atyp: request.atyp,
                 addr: request.addr,
                 port: request.port,
+                _guard: guard,
             });
             let mut guard = sessions.lock().await;
             if let Some(session) = guard.get(&key) {

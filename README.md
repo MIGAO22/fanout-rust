@@ -2,7 +2,7 @@
 
 [fanout](https://github.com/MIGAO22/fanout) 的 Rust 全量重构版：把 VPN Gate 的公共 OpenVPN 节点转换成本地 SOCKS5 出口，并可选择叠加 Cloudflare WARP。前端、工作目录和主要操作方式与 Go 版保持兼容。
 
-稳定版：[v1.2.0](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.2.0)
+稳定版：[v1.2.5](https://github.com/MIGAO22/fanout-rust/releases/tag/v1.2.5)
 
 历史测试版：[Releases](https://github.com/MIGAO22/fanout-rust/releases)
 
@@ -13,7 +13,7 @@
 - 自动拉取、评分和缓存 VPN Gate 节点；主接口限流时通过 curl 或在线出口兜底。
 - 健康检查、失败候选轮换、退避重连、节点超时替换和旧 WARP 账号清理。
 - 可选的 Cloudflare WARP 中转：注册、WireGuard 握手、分流路由和超时自动替换。
-- 出口组：单一出口、轮询出口、负载均衡、并发出口，以及带强预检和原子切换的稳定模式。
+- 出口组：单一出口、轮询出口、负载均衡、并发出口，所有策略均支持原子成员切换，已有 TCP/UDP 连接不中断。
 - 出口组自动补位、首选国家、60% 国家配额、在线出口复用和全局 20 台上限。
 - 实时出口指标：探活延迟、抖动、丢包、SOCKS 吞吐、重连与失败时间线。
 - 智能选路：EWMA 质量评分、失败节点隔离、最短驻留、切换冷却和出口组自动策略。
@@ -181,6 +181,8 @@ http://服务器IP:8899/migao/
 | 负载均衡 | `latency` | 在延迟接近的最快出口之间轮换，避免单条过载 |
 | 并发出口 | `race` | 同时向多条出口拨号，使用最先成功的一条 |
 | 稳定模式 | `stable` | 当前成员粘滞，备选后台预检；切换前执行 TCP、UDP DNS、出口 IP、WARP/路由强验证，通过后原子切换 |
+
+单一、轮询、负载均衡和并发模式在成员或模式更新时使用原子快照：新连接使用更新后的成员，旧连接继续持有原 socket 与隧道代次租约；被替换的隧道等到最后一个 TCP/UDP 会话结束后才退休。
 
 稳定模式：
 

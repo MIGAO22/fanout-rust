@@ -18,7 +18,7 @@ use crate::{
         POOL_MODE_BALANCE, POOL_MODE_ROUND_ROBIN, POOL_MODE_SINGLE, POOL_MODE_STABLE,
         POOL_PROBE_INTERVAL, POOL_PROBE_TARGET, POOL_TRY_TIMEOUT,
     },
-    socks5::{serve_socks, DialNetwork, DialSocket, SocksDialer},
+    socks5::{serve_socks, DialGuard, DialNetwork, DialSocket, SocksDialer},
 };
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -37,7 +37,7 @@ use std::{
 };
 use tokio::{
     net::TcpListener,
-    sync::{mpsc, Mutex as AsyncMutex, Semaphore},
+    sync::{mpsc, Mutex as AsyncMutex, OwnedMutexGuard, Semaphore},
     task::JoinHandle,
     time::{interval_at, sleep, timeout, Instant},
 };
@@ -118,6 +118,17 @@ impl SocksDialer for PoolDialer {
             .await
             .map(|(socket, _)| socket)
     }
+
+    async fn dial_guarded(
+        &self,
+        network: DialNetwork,
+        addr: &str,
+    ) -> Result<(DialSocket, DialGuard)> {
+        self.service
+            .dial_guarded(&self.pool_id, network, addr)
+            .await
+            .map(|(socket, _, guard)| (socket, guard))
+    }
 }
 
 #[derive(Default)]
@@ -172,6 +183,7 @@ struct PoolRun {
     step: AtomicUsize,
     membership_epoch: AtomicU64,
     stable_switch: AsyncMutex<()>,
+    route_switch: Arc<AsyncMutex<()>>,
     closing: AtomicBool,
     runtime: Arc<StdMutex<PoolRuntimeState>>,
     connections: Arc<Semaphore>,
@@ -193,6 +205,7 @@ impl PoolRun {
             step: AtomicUsize::new(pool.rr_step),
             membership_epoch: AtomicU64::new(0),
             stable_switch: AsyncMutex::new(()),
+            route_switch: Arc::new(AsyncMutex::new(())),
             closing: AtomicBool::new(false),
             runtime: Arc::new(StdMutex::new(PoolRuntimeState::new(
                 &pool.mode,
@@ -265,6 +278,10 @@ impl PoolRun {
 
     fn membership_epoch(&self) -> u64 {
         self.membership_epoch.load(Ordering::Acquire)
+    }
+
+    async fn route_swap_lock(self: &Arc<Self>) -> OwnedMutexGuard<()> {
+        self.route_switch.clone().lock_owned().await
     }
 
     fn apply_target_state(&self, target: &str, members: &mut [PoolMember]) {
@@ -527,6 +544,12 @@ impl PoolService {
         } else {
             false
         };
+        let _route_guard = if existing {
+            self.run_of(&pool.id)
+                .map(|run| run.route_switch.clone().lock_owned().await)
+        } else {
+            None
+        };
         if let Some(index) = store.pools.iter().position(|item| item.id == pool.id) {
             pool.port = store.pools[index].port;
             pool.cred = store.pools[index].cred.clone();
@@ -572,6 +595,9 @@ impl PoolService {
             .iter()
             .position(|pool| pool.id == id)
             .ok_or_else(|| anyhow!("出口组不存在"))?;
+        let _route_guard = self
+            .run_of(id)
+            .map(|run| run.route_switch.clone().lock_owned().await);
         store.pools.remove(index);
         store.save(&self.inner.dir)?;
         {
@@ -615,23 +641,27 @@ impl PoolService {
             return Ok(false);
         }
         let mut store = lock_unpoisoned(&self.inner.state).store.clone();
-        let mut changed = false;
-        let mut affected = Vec::new();
+        let affected: Vec<String> = store
+            .pools
+            .iter()
+            .filter(|pool| pool.hosts.iter().any(|host| host == old_host))
+            .map(|pool| pool.id.clone())
+            .collect();
+        if affected.is_empty() {
+            return Ok(false);
+        }
+        let mut route_guards = Vec::new();
+        for id in &affected {
+            if let Some(run) = self.run_of(id) {
+                route_guards.push(run.route_swap_lock().await);
+            }
+        }
         for pool in &mut store.pools {
-            let mut pool_changed = false;
             for host in &mut pool.hosts {
                 if host == old_host {
                     *host = new_host.to_string();
-                    changed = true;
-                    pool_changed = true;
                 }
             }
-            if pool_changed {
-                affected.push(pool.id.clone());
-            }
-        }
-        if !changed {
-            return Ok(false);
         }
         store.save(&self.inner.dir)?;
         {
@@ -1056,69 +1086,106 @@ impl PoolService {
         network: DialNetwork,
         addr: &str,
     ) -> Result<(DialSocket, String)> {
+        self.dial_guarded(id, network, addr)
+            .await
+            .map(|(socket, host, _)| (socket, host))
+    }
+
+    pub async fn dial_guarded(
+        &self,
+        id: &str,
+        network: DialNetwork,
+        addr: &str,
+    ) -> Result<(DialSocket, String, DialGuard)> {
         self.ensure_open()?;
         let run = self.run_of(id).ok_or_else(|| anyhow!("出口组未在运行"))?;
-        let pool = self.pool(id).ok_or_else(|| anyhow!("出口组不存在"))?;
         let target = target_key(addr);
-        let members = self.resolved_members(id).await;
-        let mut policy_members: Vec<PoolMember> =
-            members.iter().map(|member| member.member.clone()).collect();
-        run.apply_target_state(&target, &mut policy_members);
-        let current_mode = run.current_mode();
-        let mode = auto_pool_mode(&pool, &policy_members, &current_mode).to_string();
-        if mode == POOL_MODE_STABLE {
-            return self
-                .stable_dial(&run, network, addr, &target, members)
-                .await;
-        }
-        let choice = run.choose_with_mode(
-            &target,
-            &policy_members,
-            network == DialNetwork::Tcp,
-            &mode,
-            pool.rr_step,
-        );
-        if choice.order.is_empty() {
-            bail!("出口组内没有可用出口");
-        }
-
-        if choice.concurrent {
-            let candidates: Vec<_> = choice
-                .order
-                .iter()
-                .filter_map(|chosen| {
-                    members
-                        .iter()
-                        .find(|member| member.member.host == chosen.host)
-                        .filter(|member| usable(member))
-                        .cloned()
-                })
-                .collect();
-            return Self::race_dial(&run, candidates, network, addr, &target).await;
-        }
-
-        let mut last_error = None;
-        for chosen in choice.order {
-            let Some(member) = members
-                .iter()
-                .find(|member| member.member.host == chosen.host)
-                .filter(|member| usable(member))
-            else {
+        loop {
+            let membership_epoch = run.membership_epoch();
+            let members = self.resolved_members(id).await;
+            let route_guard = run.route_swap_lock().await;
+            if run.membership_epoch() != membership_epoch {
                 continue;
+            }
+            let Some(pool) = self.pool(id) else {
+                bail!("出口组不存在");
             };
-            let outcome = dial_candidate(member, network, addr).await;
-            match outcome.result {
-                Ok(socket) => {
-                    run.note_success(&target, &outcome.host, outcome.elapsed);
-                    return Ok((socket, outcome.host));
+            let mut policy_members: Vec<PoolMember> =
+                members.iter().map(|member| member.member.clone()).collect();
+            run.apply_target_state(&target, &mut policy_members);
+            let current_mode = run.current_mode();
+            let mode = auto_pool_mode(&pool, &policy_members, &current_mode).to_string();
+            if mode == POOL_MODE_STABLE {
+                drop(route_guard);
+                let (socket, host) = self
+                    .stable_dial(&run, network, addr, &target, members)
+                    .await?;
+                return Ok((socket, host, DialGuard::none()));
+            }
+            let choice = run.choose_with_mode(
+                &target,
+                &policy_members,
+                network == DialNetwork::Tcp,
+                &mode,
+                pool.rr_step,
+            );
+            if choice.order.is_empty() {
+                bail!("出口组内没有可用出口");
+            }
+            let mut guarded = Vec::new();
+            for chosen in choice.order {
+                let Some(member) = members
+                    .iter()
+                    .find(|member| member.member.host == chosen.host)
+                    .filter(|member| usable(member))
+                else {
+                    continue;
+                };
+                let Some(tunnel) = member.tunnel.as_ref() else {
+                    continue;
+                };
+                let Some(guard) = self.inner.manager.lease_tunnel(tunnel) else {
+                    continue;
+                };
+                guarded.push((member.clone(), guard));
+            }
+            if guarded.is_empty() {
+                bail!("出口组内没有可用出口");
+            }
+            drop(route_guard);
+
+            if choice.concurrent {
+                let mut current = Vec::new();
+                for (member, guard) in guarded {
+                    if self.member_current(&member).await {
+                        current.push((member, guard));
+                    }
                 }
-                Err(error) => {
-                    last_error = Some(error);
-                    run.note_failure(&outcome.host);
+                if current.is_empty() {
+                    bail!("出口组内没有可用出口");
+                }
+                return Self::race_dial(&run, current, network, addr, &target).await;
+            }
+
+            let mut last_error = None;
+            for (member, guard) in guarded {
+                if !self.member_current(&member).await {
+                    continue;
+                }
+                let outcome = dial_candidate_guarded(&member, network, addr, guard).await;
+                match outcome.result {
+                    Ok(socket) => {
+                        run.note_success(&target, &outcome.host, outcome.elapsed);
+                        return Ok((socket, outcome.host, outcome.guard.unwrap()));
+                    }
+                    Err(error) => {
+                        last_error = Some(error);
+                        run.note_failure(&outcome.host);
+                    }
                 }
             }
+            return Err(last_error.unwrap_or_else(|| anyhow!("出口组内没有可用出口")));
         }
-        Err(last_error.unwrap_or_else(|| anyhow!("出口组内没有可用出口")))
     }
 
     /// Runs one periodic stale-sample probe pass. The background task calls
@@ -1570,6 +1637,11 @@ impl PoolService {
     }
 
     async fn swap_member_locked(&self, id: &str, old_host: &str, new_host: &str) -> Result<()> {
+        let _route_guard = if let Some(run) = self.run_of(id) {
+            Some(run.route_swap_lock().await)
+        } else {
+            None
+        };
         let changed = {
             let mut state = lock_unpoisoned(&self.inner.state);
             let mut store = state.store.clone();
@@ -1617,7 +1689,7 @@ impl PoolService {
             used_by_pool,
             inbound_bound,
         ) {
-            if let Err(err) = self.inner.manager.stop_current(&tunnel).await {
+            if let Err(err) = self.inner.manager.stop_if_idle(&tunnel).await {
                 warn!("出口组顶替后收尾 {host}（槽位 {slot}）失败: {err}");
             }
         }
@@ -1681,6 +1753,7 @@ impl PoolService {
             lock_unpoisoned(&self.inner.state).member_cache.remove(id);
             return Vec::new();
         }
+        let resolution_epoch = self.run_of(id).map(|run| run.membership_epoch());
         if let Some((_at, members)) = lock_unpoisoned(&self.inner.state)
             .member_cache
             .get(id)
@@ -1752,14 +1825,17 @@ impl PoolService {
                 member.member.cooling = snapshot.cooling;
             }
         }
+        let publish_epoch = self.run_of(id).map(|run| run.membership_epoch());
         {
             let mut state = lock_unpoisoned(&self.inner.state);
             if state.member_cache.len() >= 128 {
                 state.member_cache.clear();
             }
-            state
-                .member_cache
-                .insert(id.to_string(), (StdInstant::now(), members.clone()));
+            if publish_epoch == resolution_epoch {
+                state
+                    .member_cache
+                    .insert(id.to_string(), (StdInstant::now(), members.clone()));
+            }
         }
         members
     }
@@ -1830,34 +1906,35 @@ impl PoolService {
 
     async fn race_dial(
         run: &PoolRun,
-        candidates: Vec<ResolvedMember>,
+        candidates: Vec<(ResolvedMember, DialGuard)>,
         network: DialNetwork,
         addr: &str,
         target: &str,
-    ) -> Result<(DialSocket, String)> {
-        if candidates.is_empty() {
+    ) -> Result<(DialSocket, String, DialGuard)> {
+        let total = candidates.len();
+        if total == 0 {
             bail!("出口组内没有可用出口");
         }
-        let (tx, mut rx) = mpsc::channel(candidates.len());
-        for member in candidates.iter().cloned() {
+        let (tx, mut rx) = mpsc::channel(total);
+        for (member, guard) in candidates {
             let tx = tx.clone();
             let addr = addr.to_string();
             tokio::spawn(async move {
-                let outcome = dial_candidate(&member, network, &addr).await;
+                let outcome = dial_candidate_guarded(&member, network, &addr, guard).await;
                 let _ = tx.send(outcome).await;
             });
         }
         drop(tx);
 
         let mut first_error = None;
-        for index in 0..candidates.len() {
+        for index in 0..total {
             let Some(outcome) = rx.recv().await else {
                 break;
             };
             match outcome.result {
                 Ok(socket) => {
                     run.note_success(target, &outcome.host, outcome.elapsed);
-                    let remaining = candidates.len() - index - 1;
+                    let remaining = total - index - 1;
                     if remaining != 0 {
                         let runtime = Arc::clone(&run.runtime);
                         let late_target = target.to_string();
@@ -1870,7 +1947,7 @@ impl PoolService {
                             }
                         });
                     }
-                    return Ok((socket, outcome.host));
+                    return Ok((socket, outcome.host, outcome.guard.unwrap()));
                 }
                 Err(error) => {
                     if first_error.is_none() {
@@ -1904,6 +1981,7 @@ struct AttemptOutcome {
     host: String,
     elapsed: Duration,
     result: Result<DialSocket>,
+    guard: Option<DialGuard>,
 }
 
 fn usable(member: &ResolvedMember) -> bool {
@@ -1932,6 +2010,24 @@ async fn dial_candidate(
     member: &ResolvedMember,
     network: DialNetwork,
     addr: &str,
+) -> AttemptOutcome {
+    dial_candidate_inner(member, network, addr, None).await
+}
+
+async fn dial_candidate_guarded(
+    member: &ResolvedMember,
+    network: DialNetwork,
+    addr: &str,
+    guard: DialGuard,
+) -> AttemptOutcome {
+    dial_candidate_inner(member, network, addr, Some(guard)).await
+}
+
+async fn dial_candidate_inner(
+    member: &ResolvedMember,
+    network: DialNetwork,
+    addr: &str,
+    guard: Option<DialGuard>,
 ) -> AttemptOutcome {
     let started = Instant::now();
     let host = member.member.host.clone();
@@ -1962,6 +2058,7 @@ async fn dial_candidate(
         host,
         elapsed: started.elapsed(),
         result,
+        guard,
     }
 }
 

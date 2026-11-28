@@ -20,7 +20,20 @@ jobs:
       - name: 格式检查
         run: cargo fmt --all -- --check
       - name: 类型检查
-        run: cargo check --all-targets
+        run: |
+          set +e
+          cargo check --all-targets > /tmp/fanout-check.log 2>&1
+          code=$?
+          cat /tmp/fanout-check.log
+          if [ "$code" -ne 0 ]; then
+            {
+              echo '### 类型检查失败'
+              echo '```log'
+              cat /tmp/fanout-check.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$code"
       - name: 单元测试
         run: |
           set +e

@@ -507,7 +507,7 @@ mod tests {
     fn timeline_prunes_events_older_than_24_hours() {
         let store = ObservabilityStore::default();
         let now = Utc::now();
-        let event = |at, kind| TimelineEvent {
+        let event = |at: DateTime<Utc>, kind: &str| TimelineEvent {
             at,
             slot: 1,
             host: "node-1".into(),

@@ -1,12 +1,12 @@
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex as StdMutex,
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 const TIMELINE_LIMIT: usize = 256;
@@ -47,7 +47,7 @@ pub struct TimelineEvent {
     pub latency_ms: Option<f64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExitMetricsSnapshot {
     pub slot: usize,
     pub host: String,

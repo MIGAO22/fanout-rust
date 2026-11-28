@@ -29,7 +29,7 @@ use crate::{
         openvpn_paths, output_command, ovpn_log_hint, ovpn_tuning, spawn_openvpn_in_netns, OvpnProc,
     },
     runtime::{TunnelFactory, TunnelRuntime},
-    socks5::{serve_socks, DialNetwork, DialSocket, SocksDialer},
+    socks5::{DialNetwork, DialSocket, SocksDialer},
     util::{one_line, write_file},
     warp_logic::{
         warp_budget, warp_exit_is_transit_only, warp_gate_ips, warp_gate_names, warp_openvpn_args,

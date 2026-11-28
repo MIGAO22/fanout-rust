@@ -11,10 +11,8 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use crate::{
     appstate::AppState,
     config::{ConnSettings, WarpPoolSettings},
-    manager::{Manager, ProvisionRequest},
+    manager::ProvisionRequest,
     models::{ExitInbound, ExitsView, WarpOverview},
-    node_health::NodeHealthSnapshot,
-    observability::TimelineEvent,
 };
 
 pub fn error(status: StatusCode, msg: impl Into<String>) -> Response {

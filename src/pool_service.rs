@@ -167,6 +167,7 @@ impl Drop for PoolServiceInner {
 struct PoolRun {
     listener: StdMutex<Option<Arc<TcpListener>>>,
     port: u16,
+    step: usize,
     runtime: Arc<StdMutex<PoolRuntimeState>>,
     connections: Arc<Semaphore>,
     udp_cursor: AtomicUsize,
@@ -184,6 +185,7 @@ impl PoolRun {
         Self {
             listener: StdMutex::new(Some(Arc::new(listener))),
             port,
+            step: pool.rr_step,
             runtime: Arc::new(StdMutex::new(PoolRuntimeState::new(
                 &pool.mode,
                 pool.rr_step,
@@ -196,6 +198,16 @@ impl PoolRun {
     }
 
     fn choose(
+        &self,
+        target: &str,
+        members: &[PoolMember],
+        allow_race: bool,
+    ) -> crate::pools_logic::PoolChoice {
+        let mode = self.current_mode();
+        self.choose_with_mode(target, members, allow_race, &mode, self.step)
+    }
+
+    fn choose_with_mode(
         &self,
         target: &str,
         members: &[PoolMember],
@@ -634,7 +646,7 @@ impl PoolService {
         run.apply_target_state(&target, &mut policy_members);
         let current_mode = run.current_mode();
         let mode = auto_pool_mode(&pool, &policy_members, &current_mode).to_string();
-        let choice = run.choose(
+        let choice = run.choose_with_mode(
             &target,
             &policy_members,
             network == DialNetwork::Tcp,
@@ -693,8 +705,10 @@ impl PoolService {
                 continue;
             };
             let members = self.resolved_members(&pool.id).await;
+            let policy_members: Vec<PoolMember> =
+                members.iter().map(|member| member.member.clone()).collect();
             let current_mode = run.current_mode();
-            let mode = auto_pool_mode(&pool, &members, &current_mode);
+            let mode = auto_pool_mode(&pool, &policy_members, &current_mode);
             if !matches!(
                 canonical_pool_mode(mode),
                 Some(POOL_MODE_SINGLE) | Some(POOL_MODE_ROUND_ROBIN) | Some(POOL_MODE_BALANCE)

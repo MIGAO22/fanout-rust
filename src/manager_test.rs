@@ -257,7 +257,7 @@ fn failed_exit_retry_requires_warp_failure_and_elapsed_timeout() {
 async fn automatic_switch_respects_dwell_and_cooldown_but_not_hard_failure() {
     let temporary = tempfile::tempdir().unwrap();
     let manager = manager(temporary.path());
-    manager.settings.write().await = WebSettings {
+    *manager.settings.write().await = WebSettings {
         conn: crate::config::ConnSettings {
             smart_selection: true,
             min_dwell_secs: 60,

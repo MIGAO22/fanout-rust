@@ -8,12 +8,12 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex as StdMutex,
     },
-    task::JoinHandle,
     time::Duration,
 };
 use tokio::{
     io::AsyncWriteExt,
     sync::{Mutex, RwLock, Semaphore},
+    task::JoinHandle,
 };
 
 use crate::{
@@ -440,6 +440,11 @@ impl WarpService {
         self.record_audit(&account, "release", "ok", "lease released")
             .await;
         if account.state == WarpAccountState::Retiring {
+            let _permit = self
+                .lock
+                .acquire()
+                .await
+                .map_err(|_| anyhow::anyhow!("WARP 服务已关闭"))?;
             self.retire_account(&account).await?;
         }
         Ok(())
@@ -505,7 +510,7 @@ impl WarpService {
         rotate
     }
 
-    pub async fn refresh_pool(&self) {
+    pub async fn refresh_pool(self: &Arc<Self>) {
         let settings = self.settings.read().await.warp();
         if settings.enabled && settings.pool.enabled && settings.pool.prewarm {
             self.start_prewarm();
@@ -696,6 +701,11 @@ impl WarpService {
         let slot_lock = self.slot_lock(slot).await;
         let _slot_guard = slot_lock.lock().await;
         if self.pool_enabled().await {
+            let _permit = self
+                .lock
+                .acquire()
+                .await
+                .map_err(|_| anyhow::anyhow!("WARP 服务已关闭"))?;
             let existing = {
                 let accounts = self.accounts.lock().await;
                 accounts
